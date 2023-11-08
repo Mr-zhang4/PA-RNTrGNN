@@ -2,10 +2,61 @@ import os
 import numpy as np
 import geopy.distance
 import time
+import torch
+from osgeo import ogr
+from road import SPoint, distance, RoadNetwork, rate2gps, gps2grid
 from datetime import date, timedelta
 from datetime import datetime as dt
 import scipy.sparse as sp
 import torch
+from rtree import Rtree
+import networkx as nx
+
+def load_rn_shp(path, is_directed=True):
+    edge_spatial_idx = Rtree()
+    edge_idx = {}
+    g = nx.read_shp(path, simplify=True, strict=False)
+
+    for n, data in g.nodes(data=True):
+        data['pt'] = SPoint(n[1], n[0])
+        if 'ShpName' in data:
+            del data['ShpName']
+
+    edges_dis = {}
+    for u,v,data in g.edges(data=True):
+        geom_line = ogr.CreateGeometryFromWkb(data['Wkb'])
+        coords = []
+        mycoords = []
+        for i in range(geom_line.GetPointCount()):
+            geom_pt = geom_line.GetPoint(i)
+            mycoords.append((geom_pt[1],geom_pt[0]))
+            coords.append(SPoint(geom_pt[1], geom_pt[0]))
+        data['coords'] = coords
+        data['length'] = sum([distance(coords[i], coords[i + 1]) for i in range(len(coords) - 1)])
+        env = geom_line.GetEnvelope()
+        edge_spatial_idx.insert(data['eid'], (env[0], env[2], env[1], env[3]))
+        edge_idx[data['eid']] = (u,v)
+        edges_dis[data['eid']] = (data['length'], mycoords)
+        del data['ShpName']
+        del data['Json']
+        del data['Wkt']
+        del data['Wkb']
+    return RoadNetwork(g, edge_spatial_idx, edge_idx, edges_dis)
+
+def get_rn_grid(mbr, rn, grid_size):
+    rn_grid = []
+    edges = rn.get_edge_idx()
+
+    for rid in edges.keys():
+        cur_grid = []
+        for rate in range(1000):
+            r = rate / 1000
+            gps = rate2gps(rn, rid, r)
+            grid_x, grid_y = gps2grid(gps, mbr, grid_size)
+            if len(cur_grid) == 0 or [grid_x, grid_y] != cur_grid[-1]:
+                cur_grid.append([grid_x, grid_y])
+        rn_grid.append(torch.tensor(cur_grid))
+    return rn_grid
 
 
 def to_sparse_tensor(dense_matrix):
@@ -18,7 +69,6 @@ def to_sparse_tensor(dense_matrix):
     sparse_tensor = torch.sparse.FloatTensor(indices, values, torch.Size(shape))
     
     return sparse_tensor
-
 
 def date_range(date1, date2):
     # date1, date2 = '20160401', '20160428'

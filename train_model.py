@@ -12,14 +12,25 @@ import pickle as pkl
 from metrics import *
 from trajectory_transition import extract_trajectory_transition
 from road_graph import extract_road_adj
+from road import get_my_adj
 from model import *
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
+from road import MBR
 import argparse
 
+SEED = 20232023
+
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
+torch.backends.cudnn.deterministic = True
+
+RN_DIR="/home/mys/master/traj_flow/code/osm2rn/hahahaMTR_PORTOM"
 
 # Arguments
 parser = argparse.ArgumentParser(description='train_model')
@@ -29,14 +40,25 @@ parser.add_argument('-p', '--pre_trained', help='pre-trained model path. E.g. Tr
 parser.add_argument('-c', '--calibrate', help='flow calibration on a daily basis', default=1)
 args = parser.parse_args()
 model_name, dataset, model_path, calibrate = args.model_name, args.dataset, args.pre_trained, bool(args.calibrate)
+model_save_path="./model/"
 
 
+grid_size = 50
 start_time = time.time()
+rn = load_rn_shp(RN_DIR, is_directed=True)
+mbr = MBR(39.86, 116.31, 39.95, 116.45)
+rn_grid = get_rn_grid(mbr, rn, grid_size)
+#print(rn_grid[100])
+g_total = get_my_adj()
+max_lat, max_lng = 39.967, 116.472
+grid_num = gps2grid(SPoint(max_lat, max_lng), mbr, grid_size)
+grid_num = (grid_num[0] + 1, grid_num[1] + 1)
+print(f"The grid num is {grid_num}")
 
 
 # Model and log
 models = {'TrGNN':Model_TrGNN, 'TrGNN-':Model_GNN}
-model = models[model_name]()
+model = models[model_name](rn_grid, grid_num)
 if model_path == '': # if no pre-trained model path
     prefix = '%s_%s'%(model_name, int(start_time))
     checkpoint_epoch = -1
@@ -46,7 +68,6 @@ if os.path.isfile(model_path):
     checkpoint_epoch = int(model_path.split('_')[-1][:-9])
 model_path = 'model/%s_%sepoch.cpt'%(prefix, '%d')
 log_path = 'log/%s.log'%prefix
-
 
 # Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -59,7 +80,7 @@ print_log(device, log_path)
 road_adj = extract_road_adj() # directed adj
 
 if dataset == 'demo':
-    start_date, end_date = '20160314', '20160314'
+    start_date, end_date = '20121001', '20121001'
     calibrate = False
 elif dataset == 'sg_expressway_8weeks':
     start_date, end_date = '20160314', '20160424' # train period + validation period
@@ -74,7 +95,7 @@ for i in range(len(trajectory_transition)):
     trajectory_transition[i] = trajectory_transition[i] + road_adj_mask
 
 if dataset == 'demo':
-    start_date, end_date = '20160314', '20160314'
+    start_date, end_date = '20121001', '20121001'
     calibrate = False
 elif dataset == 'sg_expressway_8weeks':
     start_date, end_date = '20160314', '20160508' # train (5 weeks) + validation (1 week) + test (2 weeks)
@@ -126,21 +147,22 @@ loss_fn = nn.MSELoss()
 learning_rate = 0.004
 num_epochs = 100
 min_mae = 10 # initialize
-early_stop_threshold = 3.0 # for val_mae
+early_stop_threshold = 0.0003 # for val_mae
 # result_function = result_analysis2 if dataset == 'sg_expressway_8weeks' else result_analysis
+N_ROAD=3711
 
 
-def validate(mode='val'):
+def validate(model, mode='val'):
     # mode: ['val', 'test']. Validate on validation set or test set.
     
     running_loss = 0
     n_samples = 0
     
-    h_init = torch.zeros(5, 2404, 1) # (gru_num_layers, n_road, hidden_size)
+    h_init = torch.zeros(5, N_ROAD, 1) # (gru_num_layers, n_road, hidden_size)
     h_init = h_init.to(device)
     
-    Y_true = np.zeros((len(indices[mode]), 2404)) # (n_sample, n_road)
-    Y_pred = np.zeros((len(indices[mode]), 2404))
+    Y_true = np.zeros((len(indices[mode]), N_ROAD)) # (n_sample, n_road)
+    Y_pred = np.zeros((len(indices[mode]), N_ROAD))
     for i in indices[mode]:
 
         d = i // 92
@@ -151,12 +173,15 @@ def validate(mode='val'):
         # W passed to device already
         y_true = normalized_flows[d*96+t+4]
         
-        ToD = torch.from_numpy(np.eye(24)[np.full((2404), ((t+4) * 15 // 60) % 24)]).float().to(device) # one-hot encoding: hour of day. (n_road, 24)
-        DoW = torch.from_numpy(np.full((2404, 1), int(d in weekdays))).float().to(device) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
+        ToD = torch.from_numpy(np.eye(24)[np.full((N_ROAD), ((t+4) * 15 // 60) % 24)]).float().to(device) # one-hot encoding: hour of day. (n_road, 24)
+        DoW = torch.from_numpy(np.full((N_ROAD, 1), int(d in weekdays))).float().to(device) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
         y_pred = model(X, T, W, h_init, W_norm, ToD, DoW)
         
         Y_true[n_samples] = flow_df.iloc[d*96+t+4].values
-        Y_pred[n_samples] = scaler.inverse_transform(y_pred.detach().cpu().numpy())
+
+        mya = y_pred.detach().cpu().numpy().reshape(1,-1)
+        # print(f"the shape of mya is {mya.shape}")
+        Y_pred[n_samples] = scaler.inverse_transform(mya)
         
         loss = loss_fn(y_pred, y_true)
         loss.detach_()
@@ -165,6 +190,7 @@ def validate(mode='val'):
         n_samples += 1
     
     Y_pred[Y_pred < 0] = 0 # correction for negative values
+    print(f"the shape of true {Y_true.shape}, pred {Y_pred.shape}")
     mae = MAE(Y_pred, Y_true, main_roads=False)
     mape = MAPE(Y_pred, Y_true, main_roads=False)
     rmse = RMSE(Y_pred, Y_true, main_roads=False)
@@ -182,15 +208,18 @@ W_norm = torch.from_numpy(normalize_adj(road_adj, mode='aggregation')).to(device
 print_log('Preprocessing completed. Clock: %.0f seconds'%(time.time() - start_time), log_path)
 
 print_log('Training model...', log_path)
-for epoch in range(checkpoint_epoch+1, num_epochs):
+stopping_count = 0
+for epoch in range( num_epochs):
+    model.train()
     
     print_log('Epoch %d'%epoch, log_path)
+    print("what the")
     
     if epoch%30 == 0:
         learning_rate /= 2
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    h_init = torch.zeros(5, 2404, 1) # (gru_num_layers, n_road, hidden_size)
+    h_init = torch.zeros(5, N_ROAD, 1) # (gru_num_layers, n_road, hidden_size)
     h_init = h_init.to(device)
     
     running_loss = 0
@@ -209,8 +238,8 @@ for epoch in range(checkpoint_epoch+1, num_epochs):
         y_true = normalized_flows[d*96+t+4] # (n_road)
         
         optimizer.zero_grad()
-        ToD = torch.from_numpy(np.eye(24)[np.full((2404), ((t+4) * 15 // 60) % 24)]).float().to(device) # one-hot encoding: hour of day. (n_road, 24)
-        DoW = torch.from_numpy(np.full((2404, 1), int(d in weekdays))).float().to(device) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
+        ToD = torch.from_numpy(np.eye(24)[np.full((N_ROAD), ((t+4) * 15 // 60) % 24)]).float().to(device) # one-hot encoding: hour of day. (n_road, 24)
+        DoW = torch.from_numpy(np.full((N_ROAD, 1), int(d in weekdays))).float().to(device) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
         y_pred = model(X, T, W, h_init, W_norm, ToD, DoW)
         loss = loss_fn(y_pred, y_true)
         loss.backward()
@@ -224,23 +253,35 @@ for epoch in range(checkpoint_epoch+1, num_epochs):
     
     train_loss = running_loss/n_samples
     print_log('Validating...', log_path)
-    val_loss, Y_pred, Y_true, val_mae = validate(mode='val')
-    print_log('Testing...', log_path)
-    test_loss, Y_pred, Y_true, test_mae = validate(mode='test')
-    line = 'Epoch %d, time spent: %.0f seconds, train_loss: %.3f, val_loss: %.3f, test_loss: %.3f'%(epoch, time.time()-start_time, train_loss, val_loss, test_loss)
+    val_loss, Y_pred, Y_true, val_mae = validate(model,mode='val')
+    line = 'Epoch %d, time spent: %.0f seconds, train_loss: %.3f, val_loss: %.3f'%(epoch, time.time()-start_time, train_loss, val_loss)
     print_log(line, log_path)
     
     if val_mae < min_mae:
+        stopping_count = 0
         min_mae = val_mae
         print_log('Saving model...', log_path)
-        torch.save(model.state_dict(), model_path%epoch)
+        # torch.save(model.state_dict(), model_path%epoch)
+        torch.save(model, model_save_path + 'val-best-model.pt')
         print_log('Saving results...', log_path)
         with open('result/%s_Y_true.pkl'%(prefix), 'wb') as f:
             pkl.dump(Y_true, f)
         with open('result/%s_%sepoch_Y_pred.pkl'%(prefix, epoch), 'wb') as f:
             pkl.dump(Y_pred, f)
 #         result_function(Y_pred, Y_true, model_type='ours', log_path=log_path) # result analysis on test results
+    else:
+        stopping_count += 1
         
+    if stopping_count >= 10:
+        print_log('myEarly stop.', log_path)
+        break
+
     if min_mae < early_stop_threshold:
         print_log('Early stop.', log_path)
         break
+
+print_log('Testing...', log_path)
+model = torch.load(model_save_path + 'val-best-model.pt').to(device)
+
+test_loss, Y_pred, Y_true, test_mae = validate(model, mode='test')
+

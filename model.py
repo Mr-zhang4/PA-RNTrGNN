@@ -3,6 +3,34 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from utils import to_sparse_tensor
+from dgl.nn.pytorch import GATConv
+N_ROAD=3711
+
+class MyGAT(nn.Module):
+    def __init__(self, node_input_dim, node_hidden_dim, num_layers=2, num_heads=8, last_activate=False):
+        super(MyGAT, self).__init__()
+        self.hid_dim = node_hidden_dim
+        assert node_hidden_dim % num_heads == 0
+        self.layers = nn.ModuleList(
+                [
+                    GATConv(
+                        in_feats= node_input_dim if i == 0 else node_hidden_dim,
+                        out_feats=node_hidden_dim // num_heads,
+                        num_heads=num_heads,
+                        feat_drop=0.0,
+                        attn_drop=0.0,
+                        residual=False,
+                        activation=F.leaky_relu if i + 1 < num_layers or last_activate else None,
+                    )
+                    for i in range(num_layers)
+                ]
+        )
+
+    def forward(self, g, n_feat):
+        for _, layer in enumerate(self.layers):
+            n_feat = layer(g, n_feat)
+            n_feat = n_feat.reshape(-1, self.hid_dim)
+        return n_feat
 
 
 def normalize_adj(adj, mode='random walk'):
@@ -68,7 +96,7 @@ class ChannelFullyConnected(nn.Module):
             init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input):
-        return F.mul(input, self.weight).sum(dim=1) + self.bias
+        return torch.mul(input, self.weight).sum(dim=1) + self.bias
 
     def extra_repr(self):
         return 'in_features={}, channels={}, bias={}'.format(
@@ -100,7 +128,7 @@ class ChannelAttention(nn.Module):
             init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input): # input: (history_window, channels=n_road, in_features=1+status_hop)
-        return F.mul(input, self.weight).sum(dim=2) + self.bias
+        return torch.mul(input, self.weight).sum(dim=2) + self.bias
 
     def extra_repr(self):
         return 'in_features={}, out_features={}, channels={}, bias={}'.format(
@@ -111,20 +139,38 @@ class ChannelAttention(nn.Module):
 class Model_TrGNN(nn.Module):
     # TrGNN.
     
-    def __init__(self, input_size=1, output_size=1, demand_hop=75, status_hop=3):
+    def __init__(self, rn_grid, grid_num, input_size=1, output_size=1, demand_hop=75, status_hop=3):
         super(Model_TrGNN, self).__init__()
         
+        self.rn_grid = rn_grid
+        self.grid_num = grid_num # TODO
+        self.pad_grid, _  = self.merge(self.rn_grid)
         self.input_size = input_size
         self.output_size = output_size
         self.demand_hop = demand_hop
         self.status_hop = status_hop
+        self.id_emb_dim = 64
+        self.id_size = N_ROAD
+        self.grid_id = nn.Parameter(torch.rand(self.grid_num[0], self.grid_num[1], self.id_emb_dim))
+        self.grid_len = torch.tensor([fea.shape[0] for fea in self.rn_grid])
+        self.grid = nn.GRU(self.id_emb_dim, self.id_emb_dim)
         
         # attention
-        self.attention_layer = ChannelAttention(2**(status_hop+1)-1, demand_hop+1, channels=2404, bias=True) # channels=n_road
+        self.attention_layer = ChannelAttention(2**(status_hop+1)-1, demand_hop+1, channels=N_ROAD, bias=True) # channels=n_road
                 
         # linear output
-        self.output_layer = ChannelFullyConnected(in_features=4+24+1, channels=2404) # channels=n_road
-        
+        self.output_layer = ChannelFullyConnected(in_features=4+24+1+self.id_emb_dim, channels=N_ROAD) # channels=n_road
+    
+    def merge(self, sequences):
+        lengths = [len(seq) for seq in sequences]
+        dim = sequences[0].size(1)
+        padded_seqs = torch.zeros(len(sequences), max(lengths), dim)
+
+        for i, seq in enumerate(sequences):
+            end = lengths[i]
+            padded_seqs[i, :end] = seq[:end]
+        # print(f"The shape of paddd is {padded_seqs.shape}")
+        return padded_seqs, lengths
 
     def forward(self, X, T, W, h_init, W_norm, ToD, DoW):
         # X: graph signal. normalized. tensor: (history_window, n_road)
@@ -133,6 +179,23 @@ class Model_TrGNN(nn.Module):
         # h_init: for GRU. (gru_num_layers, n_road, hidden_size)
         # ToD: road-wise one-hot encoding of hour of day. (n_road, 24)
         # DoW: road-wise indicator. 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
+
+        max_grid_len =self.pad_grid.size(1)
+        rn_grid = self.pad_grid.reshape(-1, 2)
+        a = rn_grid.numpy()[:, 0]
+        b = rn_grid.numpy()[:, 1]
+        grid_input = self.grid_id[rn_grid.numpy()[:, 0], rn_grid.numpy()[:, 1], :]
+        # print(f"TGhe shape before is {grid_input.shape}")
+        grid_input = grid_input.reshape(self.id_size, max_grid_len, -1).transpose(0, 1)
+        # print(f"the shape of grid input is {grid_input.shape}")
+        # print(f"the shape of X is {X.shape}")
+
+        packed_grid_input = nn.utils.rnn.pack_padded_sequence(grid_input, self.grid_len,
+                                                      batch_first=False, enforce_sorted=False)
+        _, grid_output = self.grid(packed_grid_input)
+        grid_output = grid_output.squeeze(0)
+        # print(f"The shape of packed input is {grid_output.shape}")
+
         
         # graph propagation
         H = torch.cat([graph_propagation_sparse(x, A.transpose(0, 1), hop=self.demand_hop).unsqueeze(0) for x, A in zip(torch.unbind(X, dim=0), T)], dim=0)
@@ -145,7 +208,7 @@ class Model_TrGNN(nn.Module):
         H = torch.sum(H, dim=2) # (history_window, n_road)
         
         # add ToD, DoW features
-        H = torch.cat([H.transpose(0, 1), ToD, DoW], dim=1) # (n_road, history_window+24+1)
+        H = torch.cat([H.transpose(0, 1), ToD, DoW, grid_output], dim=1) # (n_road, history_window+24+1)
         
         # linear output. specify weights and bias for each road segment
         Y = self.output_layer(H) # (1, 1, n_road)
@@ -165,10 +228,10 @@ class Model_GNN(nn.Module):
         self.status_hop = status_hop
         
         # attention
-        self.attention_layer = ChannelAttention(2**(status_hop+1)-1, demand_hop+1, channels=2404, bias=True) # channels=n_road
+        self.attention_layer = ChannelAttention(2**(status_hop+1)-1, demand_hop+1, channels=N_ROAD, bias=True) # channels=n_road
                 
         # linear output
-        self.output_layer = ChannelFullyConnected(in_features=4+24+1, channels=2404) # channels=n_road
+        self.output_layer = ChannelFullyConnected(in_features=4+24+1, channels=N_ROAD) # channels=n_road
         
 
     def forward(self, X, T, W, h_init, W_norm, ToD, DoW):
