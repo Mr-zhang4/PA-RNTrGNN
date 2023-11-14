@@ -55,17 +55,27 @@ def graph_propagation_sparse(x, A, hop=10, dual=False):
     # hop: # propagation steps
     # output: propagation result. tensor. (n_road, hop+1)
     
-    y = x.unsqueeze(1)
+    x = x.permute(1, 0)
+    size = x.size(0)
+    if not dual:
+        A = A.permute(2, 0, 1)
+    else:
+        A = A.unsqueeze(0).repeat(size, 1, 1)
+    print(f"in paropagation {x.shape}, {A.shape}")
+
+    y = x.unsqueeze(2)
     X = y
+    print(f"the X, y shape {X.shape}, {y.shape}")
     if dual: # dual random walk
         for i in range(hop):
-            y_down = A.mm(X) # downstream
-            y_up = A.transpose(0, 1).mm(X) # upstream
-            X = torch.cat([y, y_down, y_up], dim=1)
+            y_down = A.bmm(X) # downstream
+            y_up = A.transpose(1, 2).bmm(X) # upstream
+            X = torch.cat([y, y_down, y_up], dim=2)
     else: # downstream random walk only
         for i in range(hop):
-            y = A.mm(y)
-            X = torch.cat([X, y], dim=1)
+            y = torch.bmm(A, y)
+            X = torch.cat([X, y], dim=2)
+    print(f"The out propagation shape is {X.shape}")
     return X
 
 
@@ -96,7 +106,7 @@ class ChannelFullyConnected(nn.Module):
             init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input):
-        return torch.mul(input, self.weight).sum(dim=1) + self.bias
+        return torch.mul(input, self.weight).sum(dim=2) + self.bias
 
     def extra_repr(self):
         return 'in_features={}, channels={}, bias={}'.format(
@@ -128,7 +138,8 @@ class ChannelAttention(nn.Module):
             init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input): # input: (history_window, channels=n_road, in_features=1+status_hop)
-        return torch.mul(input, self.weight).sum(dim=2) + self.bias
+        print(f"The shape of input is {input.shape}")
+        return torch.mul(input, self.weight).sum(dim=3) + self.bias
 
     def extra_repr(self):
         return 'in_features={}, out_features={}, channels={}, bias={}'.format(
@@ -259,3 +270,95 @@ class Model_GNN(nn.Module):
         Y = self.output_layer(H) # (1, 1, n_road)
 
         return Y.squeeze(0).squeeze(0)
+
+class MYModel_TrGNN(nn.Module):
+    # TrGNN.
+    
+    def __init__(self, rn_grid, grid_num, input_size=1, output_size=1, demand_hop=75, status_hop=3):
+        super(MYModel_TrGNN, self).__init__()
+        
+        self.rn_grid = rn_grid
+        self.grid_num = grid_num # TODO
+        self.pad_grid, _  = self.merge(self.rn_grid)
+        self.input_size = input_size
+        self.output_size = output_size
+        self.demand_hop = demand_hop
+        self.status_hop = status_hop
+        self.id_emb_dim = 64
+        self.id_size = N_ROAD
+        self.grid_id = nn.Parameter(torch.rand(self.grid_num[0], self.grid_num[1], self.id_emb_dim))
+        self.grid_len = torch.tensor([fea.shape[0] for fea in self.rn_grid])
+        self.grid = nn.GRU(self.id_emb_dim, self.id_emb_dim)
+        
+        # attention
+        self.attention_layer = ChannelAttention(2**(status_hop+1)-1, demand_hop+1, channels=N_ROAD, bias=True) # channels=n_road
+                
+        # linear output
+        self.output_layer = ChannelFullyConnected(in_features=4+24+1, channels=N_ROAD) # channels=n_road
+    
+    def merge(self, sequences):
+        lengths = [len(seq) for seq in sequences]
+        dim = sequences[0].size(1)
+        padded_seqs = torch.zeros(len(sequences), max(lengths), dim)
+
+        for i, seq in enumerate(sequences):
+            end = lengths[i]
+            padded_seqs[i, :end] = seq[:end]
+        # print(f"The shape of paddd is {padded_seqs.shape}")
+        return padded_seqs, lengths
+
+    def forward(self, X, T, W, h_init, W_norm, ToD, DoW):
+        # X: graph signal. normalized. tensor: (history_window, n_road)
+        # T: trajectory transition. normalized. tuple of history_window sparse_tensors: (n_road, n_road)
+        # W: weighted road adjacency matrix. # sparse_tensor: (n_road, n_road)
+        # h_init: for GRU. (gru_num_layers, n_road, hidden_size)
+        # ToD: road-wise one-hot encoding of hour of day. (n_road, 24)
+        # DoW: road-wise indicator. 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
+
+        print(f"The shape of X, T, w_norm, ToD, DoW {X.shape}, {T.shape}, {W_norm.shape}, {ToD.shape}, {DoW.shape}")
+        max_grid_len =self.pad_grid.size(1)
+        rn_grid = self.pad_grid.reshape(-1, 2)
+        a = rn_grid.numpy()[:, 0]
+        b = rn_grid.numpy()[:, 1]
+        grid_input = self.grid_id[rn_grid.numpy()[:, 0], rn_grid.numpy()[:, 1], :]
+        # print(f"TGhe shape before is {grid_input.shape}")
+        grid_input = grid_input.reshape(self.id_size, max_grid_len, -1).transpose(0, 1)
+        # print(f"the shape of grid input is {grid_input.shape}")
+        # print(f"the shape of X is {X.shape}")
+
+        packed_grid_input = nn.utils.rnn.pack_padded_sequence(grid_input, self.grid_len,
+                                                      batch_first=False, enforce_sorted=False)
+        _, grid_output = self.grid(packed_grid_input)
+        grid_output = grid_output.squeeze(0)
+        print(f"The shape of packed input is {grid_output.shape}")
+
+        
+        X = X.permute(1,2,0)
+        T = T.permute(1,2,3,0)
+
+        # graph propagation
+        # TODO
+        H = torch.cat([graph_propagation_sparse(x, A.transpose(0, 1), hop=self.demand_hop).unsqueeze(0) for x, A in zip(torch.unbind(X, dim=0), T)], dim=0)
+        H = H.transpose(0,1)
+
+        # attention
+        S = torch.cat([graph_propagation_sparse(x, W_norm, hop=self.status_hop, dual=True).unsqueeze(0) for x in torch.unbind(X, dim=0)], dim=0)
+        S = S.transpose(0,1)
+        print(f"the s shape is {S.shape}")
+        att = self.attention_layer(S.unsqueeze(4)) # specify weights and bias for each road segment
+        print(f"the shape of attn is {att.shape}")
+        att = F.softmax(att, dim=3) # attention weights across hops sum up to 1. (history_window, n_road, demand_hop+1)
+        print(f"the shape of H {H.shape}, attn {att.shape}")
+        H = torch.mul(H, att) # (history_window, n_road, demand_hop+1)
+        H = torch.sum(H, dim=3) # (history_window, n_road)
+        
+        print(f"the shape of H, ToD, DoW is {H.shape}, {ToD.shape}, {DoW.shape}")
+        # add ToD, DoW features
+        H = torch.cat([H.transpose(1, 2), ToD, DoW], dim=2) # (n_road, history_window+24+1)
+        
+        # linear output. specify weights and bias for each road segment
+        print(f"The shape of H is {H.shape}")
+        Y = self.output_layer(H) # (1, 1, n_road)
+
+        print(f"The Y is {Y.shape}")
+        return Y

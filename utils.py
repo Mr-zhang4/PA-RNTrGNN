@@ -60,6 +60,7 @@ def get_rn_grid(mbr, rn, grid_size):
 
 
 def to_sparse_tensor(dense_matrix):
+    return torch.from_numpy(dense_matrix)
     coo = sp.coo_matrix(dense_matrix)
 
     indices = torch.LongTensor(np.vstack((coo.row, coo.col)))

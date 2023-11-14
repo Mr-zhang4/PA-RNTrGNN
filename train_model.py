@@ -4,6 +4,7 @@ import time
 from datetime import date, timedelta
 from datetime import datetime as dt
 import os
+from dataset import Dataset
 from utils import *
 import random
 import numpy as np
@@ -41,6 +42,7 @@ parser.add_argument('-c', '--calibrate', help='flow calibration on a daily basis
 args = parser.parse_args()
 model_name, dataset, model_path, calibrate = args.model_name, args.dataset, args.pre_trained, bool(args.calibrate)
 model_save_path="./model/"
+batch_size = 32
 
 
 grid_size = 50
@@ -57,8 +59,9 @@ print(f"The grid num is {grid_num}")
 
 
 # Model and log
-models = {'TrGNN':Model_TrGNN, 'TrGNN-':Model_GNN}
-model = models[model_name](rn_grid, grid_num)
+# models = {'TrGNN':Model_TrGNN, 'TrGNN-':Model_GNN}
+# model = models[model_name](rn_grid, grid_num)
+model = MYModel_TrGNN(rn_grid, grid_num, demand_hop=1, status_hop=1)
 if model_path == '': # if no pre-trained model path
     prefix = '%s_%s'%(model_name, int(start_time))
     checkpoint_epoch = -1
@@ -71,7 +74,7 @@ log_path = 'log/%s.log'%prefix
 
 # Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
+model2 = model.to(device)
 print_log(device, log_path)
 
 
@@ -111,8 +114,8 @@ if calibrate:
     multipliers = np.repeat(np.array(trajectory_metadata['vehicles'][0] / trajectory_metadata['vehicles']), 96)
     multipliers[multipliers==np.inf]=0
     flow_df = flow_df.mul(multipliers, axis=0)
-print_log(flow_df.shape, log_path)
-print_log('Total flow: %d'%(flow_df.sum().sum()), log_path)
+# print_log(flow_df.shape, log_path)
+# print_log('Total flow: %d'%(flow_df.sum().sum()), log_path)
 
 
 if dataset == 'demo': # 20160314
@@ -198,76 +201,111 @@ def validate(model, mode='val'):
     
     return running_loss/n_samples, Y_pred, Y_true, mae
 
-    
-# preprocessing
-print_log('Preprocessing...', log_path)
-normalized_flows = torch.from_numpy(scaler.transform(flow_df.values)).float().to(device) # for X. normalized
-transitions_ToD = [to_sparse_tensor(normalize_adj(trajectory_transition[i])).to(device) for i in range(len(trajectory_transition))] # for T. time of day
-W = torch.from_numpy(road_adj).to(device) # for W
-W_norm = torch.from_numpy(normalize_adj(road_adj, mode='aggregation')).to(device) # for normalized W
-print_log('Preprocessing completed. Clock: %.0f seconds'%(time.time() - start_time), log_path)
-
-print_log('Training model...', log_path)
-stopping_count = 0
-for epoch in range( num_epochs):
-    model.train()
-    
-    print_log('Epoch %d'%epoch, log_path)
-    print("what the")
-    
-    if epoch%30 == 0:
-        learning_rate /= 2
-    
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+def validate2(model, data_iter, mode):
     h_init = torch.zeros(5, N_ROAD, 1) # (gru_num_layers, n_road, hidden_size)
     h_init = h_init.to(device)
-    
     running_loss = 0
-    n_samples = 0
-    
-    np.random.shuffle(indices['train'])
-    for index in range(len(indices['train'])):
-        
-        i = indices['train'][index]
-        d = i // 92
-        t = i % 92
-        
-        X = normalized_flows[d*96+t : d*96+t+4] # tensor: (n_timestamp, n_road)
-        T = tuple(transitions_ToD[t:t+4]) # tuple of n_timestamp sparse_tensors: (n_road, n_road)
-        # W passed to device already # sparse_tensor: (n_road, n_road)
-        y_true = normalized_flows[d*96+t+4] # (n_road)
-        
-        optimizer.zero_grad()
-        ToD = torch.from_numpy(np.eye(24)[np.full((N_ROAD), ((t+4) * 15 // 60) % 24)]).float().to(device) # one-hot encoding: hour of day. (n_road, 24)
-        DoW = torch.from_numpy(np.full((N_ROAD, 1), int(d in weekdays))).float().to(device) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
+    n_samples = len(data_iter)
+
+    total_mae = 0
+    total_mape = 0
+    total_rmse = 0
+    for i, batch in enumerate(data_iter):
+        X, T, ToD, DoW, y_true, raw_true = batch
+
+        X = X.to(device)
+        T = T.to(device)
+        ToD = ToD.float().to(device)
+        DoW  = DoW.float().to(device)
+        y_true = y_true.to(device)
+        raw_true  = raw_true.numpy()
         y_pred = model(X, T, W, h_init, W_norm, ToD, DoW)
+
+        print(f"The my_pred shape is {y_pred.shape}")
+        my_pred = y_pred.detach().cpu().numpy()
+        raw_pred = scaler.inverse_transform(my_pred)
+        loss = loss_fn(y_pred, y_true)
+        loss.detach_()
+        running_loss += loss.item()
+
+        print(f"the type of raw {type(raw_pred)}, {type(raw_true)}")
+        mae = MAE(raw_pred, raw_true, main_roads=False)
+        mape = MAPE(raw_pred, raw_true, main_roads=False)
+        rmse = RMSE(raw_pred, raw_true, main_roads=False)
+
+        total_mae += mae
+        total_mape += mape
+        total_rmse += rmse
+    print_log('>> %s_loss: %.3f, MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(mode, running_loss/n_samples, total_mae/n_samples, total_mape, total_rmse), log_path)
+
+    return running_loss / n_samples, total_mae
+
+# preprocessing
+print_log('Preprocessing...', log_path)
+normalized_flows = torch.from_numpy(scaler.transform(flow_df.values)).float() # for X. normalized
+# transitions_ToD = torch.stack([to_sparse_tensor(normalize_adj(trajectory_transition[i])) for i in range(len(trajectory_transition))]) # for T. time of day
+# torch.save(transitions_ToD, "./myTensor.pt")
+# TODO
+transitions_ToD =  torch.load("./myTensor.pt")
+W = torch.from_numpy(road_adj) # for W
+W_norm = torch.from_numpy(normalize_adj(road_adj, mode='aggregation')) # for normalized W
+print_log('Preprocessing completed. Clock: %.0f seconds'%(time.time() - start_time), log_path)
+
+# print(f"The shape of flows, transition, weekdays {normalized_flows.shape}, {transitions_ToD.shape}")
+## todo train, val, test
+train_dataset = Dataset(normalized_flows,flow_df, weekdays,transitions_ToD, indices, 'train')
+train_iter = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+val_dataset = Dataset(normalized_flows,flow_df, weekdays,transitions_ToD, indices, 'val')
+val_iter = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
+
+test_dataset = Dataset(normalized_flows,flow_df, weekdays,transitions_ToD, indices, 'test')
+test_iter = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+optimizer = torch.optim.Adam(model2.parameters(), lr=learning_rate)
+stopping_count = 0 
+for epoch in range(1):
+    model2.train()
+    h_init = torch.zeros(5, N_ROAD, 1) # (gru_num_layers, n_road, hidden_size)
+    h_init = h_init.to(device)
+    running_loss = 0
+    n_samples = len(train_iter)
+
+    for i, batch in enumerate(train_iter):
+        X, T, ToD, DoW, y_true, _ = batch
+
+        X = X.to(device)
+        T = T.to(device)
+        ToD = ToD.float().to(device)
+        DoW  = DoW.float().to(device)
+        y_true = y_true.to(device)
+        # print(f"The shape of X, T, dow, y_true {X.shape}, {T.shape}, {DoW.shape}, {y_true.shape}")
+        print(f"the type of everything is {X.dtype}, {T.dtype}, {W_norm.dtype}, {ToD.dtype}, {DoW.dtype}")
+
+        y_pred = model2(X, T, W, h_init, W_norm, ToD, DoW)
+        print(f"The type of y_pred is {y_pred.dtype}")
         loss = loss_fn(y_pred, y_true)
         loss.backward()
         
         optimizer.step()
         
         running_loss += loss.item()
-        n_samples += 1
-        if n_samples % 500 == 0:
-            print_log('Epoch %d, %d samples, clock: %.0f seconds'%(epoch, n_samples, time.time() - start_time), log_path)
-    
-    train_loss = running_loss/n_samples
+        print(running_loss/(i+1))
+
     print_log('Validating...', log_path)
-    val_loss, Y_pred, Y_true, val_mae = validate(model,mode='val')
-    line = 'Epoch %d, time spent: %.0f seconds, train_loss: %.3f, val_loss: %.3f'%(epoch, time.time()-start_time, train_loss, val_loss)
+    val_loss, val_mae = validate2(model2,val_iter, 'val')
+    line = 'Epoch %d, time spent: %.0f seconds, train_loss: %.3f, val_loss: %.3f'%(epoch, time.time()-start_time, running_loss/n_samples, val_loss)
     print_log(line, log_path)
-    
     if val_mae < min_mae:
         stopping_count = 0
         min_mae = val_mae
         print_log('Saving model...', log_path)
-        # torch.save(model.state_dict(), model_path%epoch)
         torch.save(model, model_save_path + 'val-best-model.pt')
         print_log('Saving results...', log_path)
-        with open('result/%s_Y_true.pkl'%(prefix), 'wb') as f:
-            pkl.dump(Y_true, f)
-        with open('result/%s_%sepoch_Y_pred.pkl'%(prefix, epoch), 'wb') as f:
-            pkl.dump(Y_pred, f)
+        # with open('result/%s_Y_true.pkl'%(prefix), 'wb') as f:
+            # pkl.dump(Y_true, f)
+        # with open('result/%s_%sepoch_Y_pred.pkl'%(prefix, epoch), 'wb') as f:
+            # pkl.dump(Y_pred, f)
 #         result_function(Y_pred, Y_true, model_type='ours', log_path=log_path) # result analysis on test results
     else:
         stopping_count += 1
@@ -275,13 +313,85 @@ for epoch in range( num_epochs):
     if stopping_count >= 10:
         print_log('myEarly stop.', log_path)
         break
+    
 
-    if min_mae < early_stop_threshold:
-        print_log('Early stop.', log_path)
-        break
+
+
+# print_log('Training model...', log_path)
+# stopping_count = 0
+# for epoch in range( num_epochs):
+    # model.train()
+    
+    # print_log('Epoch %d'%epoch, log_path)
+    # print("what the")
+    
+    # if epoch%30 == 0:
+        # learning_rate /= 2
+    
+    # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # h_init = torch.zeros(5, N_ROAD, 1) # (gru_num_layers, n_road, hidden_size)
+    # h_init = h_init.to(device)
+    
+    # running_loss = 0
+    # n_samples = 0
+    
+    # np.random.shuffle(indices['train'])
+    # for index in range(len(indices['train'])):
+        
+        # i = indices['train'][index]
+        # d = i // 92
+        # t = i % 92
+        
+        # X = normalized_flows[d*96+t : d*96+t+4] # tensor: (n_timestamp, n_road)
+        # T = tuple(transitions_ToD[t:t+4]) # tuple of n_timestamp sparse_tensors: (n_road, n_road)
+        # # W passed to device already # sparse_tensor: (n_road, n_road)
+        # y_true = normalized_flows[d*96+t+4] # (n_road)
+        
+        # optimizer.zero_grad()
+        # ToD = torch.from_numpy(np.eye(24)[np.full((N_ROAD), ((t+4) * 15 // 60) % 24)]).float().to(device) # one-hot encoding: hour of day. (n_road, 24)
+        # DoW = torch.from_numpy(np.full((N_ROAD, 1), int(d in weekdays))).float().to(device) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
+        # y_pred = model(X, T, W, h_init, W_norm, ToD, DoW)
+        # loss = loss_fn(y_pred, y_true)
+        # loss.backward()
+        
+        # optimizer.step()
+        
+        # running_loss += loss.item()
+        # n_samples += 1
+        # if n_samples % 500 == 0:
+            # print_log('Epoch %d, %d samples, clock: %.0f seconds'%(epoch, n_samples, time.time() - start_time), log_path)
+    
+    # train_loss = running_loss/n_samples
+    # print_log('Validating...', log_path)
+    # val_loss, Y_pred, Y_true, val_mae = validate(model,mode='val')
+    # line = 'Epoch %d, time spent: %.0f seconds, train_loss: %.3f, val_loss: %.3f'%(epoch, time.time()-start_time, train_loss, val_loss)
+    # print_log(line, log_path)
+    
+    # if val_mae < min_mae:
+        # stopping_count = 0
+        # min_mae = val_mae
+        # print_log('Saving model...', log_path)
+        # # torch.save(model.state_dict(), model_path%epoch)
+        # torch.save(model, model_save_path + 'val-best-model.pt')
+        # print_log('Saving results...', log_path)
+        # with open('result/%s_Y_true.pkl'%(prefix), 'wb') as f:
+            # pkl.dump(Y_true, f)
+        # with open('result/%s_%sepoch_Y_pred.pkl'%(prefix, epoch), 'wb') as f:
+            # pkl.dump(Y_pred, f)
+# #         result_function(Y_pred, Y_true, model_type='ours', log_path=log_path) # result analysis on test results
+    # else:
+        # stopping_count += 1
+        
+    # if stopping_count >= 10:
+        # print_log('myEarly stop.', log_path)
+        # break
+
+    # if min_mae < early_stop_threshold:
+        # print_log('Early stop.', log_path)
+        # break
 
 print_log('Testing...', log_path)
 model = torch.load(model_save_path + 'val-best-model.pt').to(device)
 
-test_loss, Y_pred, Y_true, test_mae = validate(model, mode='test')
+test_loss, test_mae = validate2(model2, test_iter, mode='test')
 
