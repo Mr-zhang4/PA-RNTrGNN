@@ -31,7 +31,7 @@ torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 torch.backends.cudnn.deterministic = True
 
-RN_DIR="/home/mys/master/traj_flow/code/osm2rn/hahahaMTR_PORTOM"
+RN_DIR="/home/mys/traj_flow/smallhahahaMTR_PORTOM"
 
 # Arguments
 parser = argparse.ArgumentParser(description='train_model')
@@ -44,24 +44,28 @@ model_name, dataset, model_path, calibrate = args.model_name, args.dataset, args
 model_save_path="./model/"
 batch_size = 32
 
+# Device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 grid_size = 50
 start_time = time.time()
 rn = load_rn_shp(RN_DIR, is_directed=True)
-mbr = MBR(39.86, 116.31, 39.95, 116.45)
+#mbr = MBR(39.86, 116.31, 39.95, 116.45)
+mbr = MBR(39.88, 116.33, 39.95, 116.45)
 rn_grid = get_rn_grid(mbr, rn, grid_size)
 #print(rn_grid[100])
-g_total = get_my_adj()
+g_total = get_my_adj().to(device)
+print(g_total)
 max_lat, max_lng = 39.967, 116.472
 grid_num = gps2grid(SPoint(max_lat, max_lng), mbr, grid_size)
 grid_num = (grid_num[0] + 1, grid_num[1] + 1)
-print(f"The grid num is {grid_num}")
+#print(f"The grid num is {grid_num}")
 
 
 # Model and log
 # models = {'TrGNN':Model_TrGNN, 'TrGNN-':Model_GNN}
 # model = models[model_name](rn_grid, grid_num)
-model = MYModel_TrGNN(rn_grid, grid_num, demand_hop=1, status_hop=1)
+model = ORModel_TrGNN(g_total, rn_grid, grid_num)
 if model_path == '': # if no pre-trained model path
     prefix = '%s_%s'%(model_name, int(start_time))
     checkpoint_epoch = -1
@@ -72,8 +76,6 @@ if os.path.isfile(model_path):
 model_path = 'model/%s_%sepoch.cpt'%(prefix, '%d')
 log_path = 'log/%s.log'%prefix
 
-# Device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model2 = model.to(device)
 print_log(device, log_path)
 
@@ -83,7 +85,7 @@ print_log(device, log_path)
 road_adj = extract_road_adj() # directed adj
 
 if dataset == 'demo':
-    start_date, end_date = '20121001', '20121001'
+    start_date, end_date = '20121001', '20121031'
     calibrate = False
 elif dataset == 'sg_expressway_8weeks':
     start_date, end_date = '20160314', '20160424' # train period + validation period
@@ -98,7 +100,7 @@ for i in range(len(trajectory_transition)):
     trajectory_transition[i] = trajectory_transition[i] + road_adj_mask
 
 if dataset == 'demo':
-    start_date, end_date = '20121001', '20121001'
+    start_date, end_date = '20121001', '20121031'
     calibrate = False
 elif dataset == 'sg_expressway_8weeks':
     start_date, end_date = '20160314', '20160508' # train (5 weeks) + validation (1 week) + test (2 weeks)
@@ -119,10 +121,14 @@ if calibrate:
 
 
 if dataset == 'demo': # 20160314
-    indices = {'train': list(range(56)), # first 14 hours
-               'val': list(range(56, 68)), # next 3 hours
-               'test': list(range(68, 92))} # last 6 hours
-    weekdays = np.array([0]) # day 0 (i.e. 20160314) is a weekday
+    indices = {'train': list(range(1288)), # first 5 weeks 20160314-20160417 (24-1)*(60/15)*56
+           'val': list(range(1288, 1932)), # 6th week 20160418-20160424 (24-1)*(60/15)*7
+           'test': list(range(1932, 2576))} # 7th-8th weeks 20160425-20160508 (24-1)*(60/15)*14
+    weekdays = np.array([  #0, 1, 2, 3, 4,
+                     7, 8, 9, 10, 11, # PH: 25th May, Friday
+                     14, 15, 16, 17, 18,
+                     21, 22, 23, 24, 25,
+                     28, 29, 30, 31]) # PH: 2nd May, Monday
 elif dataset == 'sg_expressway_8weeks': # version 20160314-20160508
     indices = {'train': list(range(3220)), # first 5 weeks 20160314-20160417 (24-1)*(60/15)*56
                'val': list(range(3220, 3864)), # 6th week 20160418-20160424 (24-1)*(60/15)*7
@@ -147,12 +153,13 @@ scaler = StandardScaler().fit(flow_df.iloc[indices['train'] + indices['val']].va
 
 # Train model
 loss_fn = nn.MSELoss()
-learning_rate = 0.004
+learning_rate = 0.0001
 num_epochs = 100
-min_mae = 10 # initialize
+min_mae = 100 # initialize
 early_stop_threshold = 0.0003 # for val_mae
-# result_function = result_analysis2 if dataset == 'sg_expressway_8weeks' else result_analysis
-N_ROAD=3711
+result_function = result_analysis2 #if dataset == 'sg_expressway_8weeks' else result_analysis
+#N_ROAD=3711
+N_ROAD=2613
 
 
 def validate(model, mode='val'):
@@ -193,7 +200,7 @@ def validate(model, mode='val'):
         n_samples += 1
     
     Y_pred[Y_pred < 0] = 0 # correction for negative values
-    print(f"the shape of true {Y_true.shape}, pred {Y_pred.shape}")
+    #print(f"the shape of true {Y_true.shape}, pred {Y_pred.shape}")
     mae = MAE(Y_pred, Y_true, main_roads=False)
     mape = MAPE(Y_pred, Y_true, main_roads=False)
     rmse = RMSE(Y_pred, Y_true, main_roads=False)
@@ -202,14 +209,16 @@ def validate(model, mode='val'):
     return running_loss/n_samples, Y_pred, Y_true, mae
 
 def validate2(model, data_iter, mode):
-    h_init = torch.zeros(5, N_ROAD, 1) # (gru_num_layers, n_road, hidden_size)
-    h_init = h_init.to(device)
+    model.eval()
+    h_init = None
     running_loss = 0
     n_samples = len(data_iter)
 
     total_mae = 0
     total_mape = 0
     total_rmse = 0
+    my_Y_true = []
+    my_Y_pred = []
     for i, batch in enumerate(data_iter):
         X, T, ToD, DoW, y_true, raw_true = batch
 
@@ -221,34 +230,43 @@ def validate2(model, data_iter, mode):
         raw_true  = raw_true.numpy()
         y_pred = model(X, T, W, h_init, W_norm, ToD, DoW)
 
-        print(f"The my_pred shape is {y_pred.shape}")
+        #print(f"The my_pred shape is {y_pred.shape}")
         my_pred = y_pred.detach().cpu().numpy()
         raw_pred = scaler.inverse_transform(my_pred)
         loss = loss_fn(y_pred, y_true)
         loss.detach_()
         running_loss += loss.item()
 
-        print(f"the type of raw {type(raw_pred)}, {type(raw_true)}")
+        #print(f"the type of raw {type(raw_pred)}, {type(raw_true)}")
+        raw_pred[raw_pred < 0] = 0
         mae = MAE(raw_pred, raw_true, main_roads=False)
         mape = MAPE(raw_pred, raw_true, main_roads=False)
         rmse = RMSE(raw_pred, raw_true, main_roads=False)
+        # print(f"The raw pred is {raw_pred.shape}, the type is {type(raw_pred)}")
+        my_Y_true.append(raw_true)
+        my_Y_pred.append(raw_pred)
 
         total_mae += mae
         total_mape += mape
         total_rmse += rmse
-    print_log('>> %s_loss: %.3f, MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(mode, running_loss/n_samples, total_mae/n_samples, total_mape, total_rmse), log_path)
+    print_log('>> %s_loss: %.3f, MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(mode, running_loss/n_samples, total_mae / n_samples, total_mape / n_samples, total_rmse / n_samples), log_path)
+    if mode == "test":
+        my_Y_true = np.concatenate(my_Y_true, axis=0)
+        my_Y_pred = np.concatenate(my_Y_pred, axis=0)
+        #print(f"The shape of my Y true and pred are {my_Y_true.shape}, {my_Y_pred.shape}")
+        result_function(my_Y_pred, my_Y_true, model_type='ours', log_path=log_path) # result analysis on test results
 
-    return running_loss / n_samples, total_mae
+    return running_loss / n_samples, total_mae / n_samples
 
 # preprocessing
 print_log('Preprocessing...', log_path)
 normalized_flows = torch.from_numpy(scaler.transform(flow_df.values)).float() # for X. normalized
-# transitions_ToD = torch.stack([to_sparse_tensor(normalize_adj(trajectory_transition[i])) for i in range(len(trajectory_transition))]) # for T. time of day
-# torch.save(transitions_ToD, "./myTensor.pt")
+transitions_ToD = torch.stack([to_sparse_tensor(normalize_adj(trajectory_transition[i])) for i in range(len(trajectory_transition))]) # for T. time of day
+#torch.save(transitions_ToD, "./myTensor.pt")
 # TODO
-transitions_ToD =  torch.load("./myTensor.pt")
+#transitions_ToD =  torch.load("./myTensor.pt")
 W = torch.from_numpy(road_adj) # for W
-W_norm = torch.from_numpy(normalize_adj(road_adj, mode='aggregation')) # for normalized W
+W_norm = torch.from_numpy(normalize_adj(road_adj, mode='aggregation')).to(device) # for normalized W
 print_log('Preprocessing completed. Clock: %.0f seconds'%(time.time() - start_time), log_path)
 
 # print(f"The shape of flows, transition, weekdays {normalized_flows.shape}, {transitions_ToD.shape}")
@@ -264,7 +282,7 @@ test_iter = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shu
 
 optimizer = torch.optim.Adam(model2.parameters(), lr=learning_rate)
 stopping_count = 0 
-for epoch in range(1):
+for epoch in range(num_epochs):
     model2.train()
     h_init = torch.zeros(5, N_ROAD, 1) # (gru_num_layers, n_road, hidden_size)
     h_init = h_init.to(device)
@@ -280,17 +298,20 @@ for epoch in range(1):
         DoW  = DoW.float().to(device)
         y_true = y_true.to(device)
         # print(f"The shape of X, T, dow, y_true {X.shape}, {T.shape}, {DoW.shape}, {y_true.shape}")
-        print(f"the type of everything is {X.dtype}, {T.dtype}, {W_norm.dtype}, {ToD.dtype}, {DoW.dtype}")
+        #print(f"the type of everything is {X.dtype}, {T.dtype}, {W_norm.dtype}, {ToD.dtype}, {DoW.dtype}")
 
         y_pred = model2(X, T, W, h_init, W_norm, ToD, DoW)
-        print(f"The type of y_pred is {y_pred.dtype}")
+        #print(f"The type of y_pred is {y_pred.dtype}")
         loss = loss_fn(y_pred, y_true)
         loss.backward()
         
+        torch.nn.utils.clip_grad_norm_(model2.parameters(), 1)  # log_vars are not necessary to clip
+
         optimizer.step()
         
         running_loss += loss.item()
-        print(running_loss/(i+1))
+        if i % 200 == 0:
+            print(running_loss/(i+1))
 
     print_log('Validating...', log_path)
     val_loss, val_mae = validate2(model2,val_iter, 'val')
@@ -300,7 +321,7 @@ for epoch in range(1):
         stopping_count = 0
         min_mae = val_mae
         print_log('Saving model...', log_path)
-        torch.save(model, model_save_path + 'val-best-model.pt')
+        torch.save(model2, model_save_path + 'val-best-model.pt')
         print_log('Saving results...', log_path)
         # with open('result/%s_Y_true.pkl'%(prefix), 'wb') as f:
             # pkl.dump(Y_true, f)
