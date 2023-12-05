@@ -65,9 +65,11 @@ def graph_propagation_sparse(x, A, grid_output, hop=10, dual=False):
     else:
         A = A.unsqueeze(0).repeat(size, 1, 1)
     #print(f"in paropagation {x.shape}, {A.shape}, {grid_output.shape}")
+    #print(f"The type of A is {type(A)}")
 
     y = x.unsqueeze(2)
     X = y
+    
     #print(f"the X, y shape {X.shape}, {y.shape}")
     if dual: # dual random walk
         for i in range(hop):
@@ -75,6 +77,7 @@ def graph_propagation_sparse(x, A, grid_output, hop=10, dual=False):
             y_up = A.transpose(1, 2).bmm(X) # upstream
             X = torch.cat([y, y_down, y_up], dim=2)
     else: # downstream random walk only
+        #print(f"The shape of y is {y.shape}")
         for i in range(hop):
             y = torch.bmm(A, y)
             X = torch.cat([X, y], dim=2)
@@ -333,9 +336,9 @@ class MYModel_TrGNN(nn.Module):
         a = rn_grid.numpy()[:, 0]
         b = rn_grid.numpy()[:, 1]
         grid_input = self.grid_id[rn_grid.numpy()[:, 0], rn_grid.numpy()[:, 1], :]
-        #print(f"TGhe shape before is {grid_input.shape}")
+        # print(f"TGhe shape before is {grid_input.shape}")
         grid_input = grid_input.reshape(self.id_size, max_grid_len, -1).transpose(0, 1)
-        #print(f"the shape of grid input is {grid_input.shape}")
+        # print(f"the shape of grid input is {grid_input.shape}")
         #print(f"the shape of X is {X.shape}")
 
         packed_grid_input = nn.utils.rnn.pack_padded_sequence(grid_input, self.grid_len,

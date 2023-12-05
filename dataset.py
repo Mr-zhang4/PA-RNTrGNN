@@ -28,9 +28,10 @@ class Dataset(torch.utils.data.Dataset):
         T = self.transition[t:t+4]
         # print(f"the t is {t}, {T.shape}")
         y_true = self.flows[d*96+t+4]
+        T = torch.stack(T)
         ToD = np.eye(24)[np.full((N_ROAD), ((t+4) * 15 // 60) % 24)] # one-hot encoding: hour of day. (n_road, 24)
         DoW = np.full((N_ROAD, 1), int(d in self.weekdays)) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
         y_raw_true = self.raw_flows.iloc[d*96+t+4].values
-        #print(f"the shape of everything {X.shape}, {T.shape}, {ToD.shape}, {DoW.shape}, {y_true.shape}, {y_raw_true.shape}")
+        # print(f"the shape of everything {X.shape}, {T.shape}, {ToD.shape}, {DoW.shape}, {y_true.shape}, {y_raw_true.shape}")
 
         return X, T, ToD,DoW, y_true, y_raw_true

@@ -65,7 +65,7 @@ grid_num = (grid_num[0] + 1, grid_num[1] + 1)
 # Model and log
 # models = {'TrGNN':Model_TrGNN, 'TrGNN-':Model_GNN}
 # model = models[model_name](rn_grid, grid_num)
-model = ORModel_TrGNN(g_total, rn_grid, grid_num)
+model = MYModel_TrGNN(g_total, rn_grid, grid_num)
 if model_path == '': # if no pre-trained model path
     prefix = '%s_%s'%(model_name, int(start_time))
     checkpoint_epoch = -1
@@ -182,6 +182,7 @@ def validate(model, mode='val'):
         T = tuple(transitions_ToD[t:t+4])
         # W passed to device already
         y_true = normalized_flows[d*96+t+4]
+        print(f"The shape of T is {T.shape}")
         
         ToD = torch.from_numpy(np.eye(24)[np.full((N_ROAD), ((t+4) * 15 // 60) % 24)]).float().to(device) # one-hot encoding: hour of day. (n_road, 24)
         DoW = torch.from_numpy(np.full((N_ROAD, 1), int(d in weekdays))).float().to(device) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
@@ -261,7 +262,9 @@ def validate2(model, data_iter, mode):
 # preprocessing
 print_log('Preprocessing...', log_path)
 normalized_flows = torch.from_numpy(scaler.transform(flow_df.values)).float() # for X. normalized
-transitions_ToD = torch.stack([to_sparse_tensor(normalize_adj(trajectory_transition[i])) for i in range(len(trajectory_transition))]) # for T. time of day
+#transitions_ToD = torch.stack([to_sparse_tensor(normalize_adj(trajectory_transition[i])) for i in range(len(trajectory_transition))]) # for T. time of day
+transitions_ToD = [to_sparse_tensor(normalize_adj(trajectory_transition[i])) for i in range(len(trajectory_transition))] # for T. time of day
+#print(f"the shape of TOod is {transitions_ToD.shape}")
 #torch.save(transitions_ToD, "./myTensor.pt")
 # TODO
 #transitions_ToD =  torch.load("./myTensor.pt")
@@ -297,7 +300,7 @@ for epoch in range(num_epochs):
         ToD = ToD.float().to(device)
         DoW  = DoW.float().to(device)
         y_true = y_true.to(device)
-        # print(f"The shape of X, T, dow, y_true {X.shape}, {T.shape}, {DoW.shape}, {y_true.shape}")
+        #print(f"The shape of X, T, dow, y_true {X.shape}, {T.shape}, {DoW.shape}, {y_true.shape}")
         #print(f"the type of everything is {X.dtype}, {T.dtype}, {W_norm.dtype}, {ToD.dtype}, {DoW.dtype}")
 
         y_pred = model2(X, T, W, h_init, W_norm, ToD, DoW)
@@ -412,7 +415,7 @@ for epoch in range(num_epochs):
         # break
 
 print_log('Testing...', log_path)
-model = torch.load(model_save_path + 'val-best-model.pt').to(device)
+model2 = torch.load(model_save_path + 'val-best-model.pt').to(device)
 
 test_loss, test_mae = validate2(model2, test_iter, mode='test')
 

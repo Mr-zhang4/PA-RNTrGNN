@@ -47,15 +47,24 @@ def get_rn_grid(mbr, rn, grid_size):
     rn_grid = []
     edges = rn.get_edge_idx()
 
+    max_lat = 0
+    max_lng = 0
     for rid in edges.keys():
         cur_grid = []
         for rate in range(1000):
             r = rate / 1000
             gps = rate2gps(rn, rid, r)
+            lat = gps.lat
+            lng = gps.lng
+            if lat > max_lat:
+                max_lat = lat
+            if lng > max_lng:
+                max_lng = lng
             grid_x, grid_y = gps2grid(gps, mbr, grid_size)
             if len(cur_grid) == 0 or [grid_x, grid_y] != cur_grid[-1]:
                 cur_grid.append([grid_x, grid_y])
         rn_grid.append(torch.tensor(cur_grid))
+    print(f"max_lat lng are {max_lat} {max_lng}")
     return rn_grid
 
 
@@ -69,6 +78,7 @@ def to_sparse_tensor(dense_matrix):
 
     sparse_tensor = torch.sparse.FloatTensor(indices, values, torch.Size(shape))
     
+    print(f"The shhhhhh is {type(sparse_tensor)}")
     return sparse_tensor
 
 def date_range(date1, date2):
