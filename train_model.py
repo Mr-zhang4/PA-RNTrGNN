@@ -65,7 +65,7 @@ grid_num = (grid_num[0] + 1, grid_num[1] + 1)
 # Model and log
 # models = {'TrGNN':Model_TrGNN, 'TrGNN-':Model_GNN}
 # model = models[model_name](rn_grid, grid_num)
-model = MYModel_TrGNN(g_total, rn_grid, grid_num)
+model = MYModel_TrGNN_test(g_total, rn_grid, grid_num)
 if model_path == '': # if no pre-trained model path
     prefix = '%s_%s'%(model_name, int(start_time))
     checkpoint_epoch = -1

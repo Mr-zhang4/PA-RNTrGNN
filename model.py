@@ -299,7 +299,11 @@ class MYModel_TrGNN(nn.Module):
         self.grid_len = torch.tensor([fea.shape[0] for fea in self.rn_grid])
         self.grid = nn.GRU(self.id_emb_dim, self.id_emb_dim * 2)
         self.mydropout = nn.Dropout(0.5)
+        self.gru = nn.GRU(4+24+1, 64, batch_first=True, bidirectional=False)
         for name, param in self.grid.named_parameters():
+            if 'weight' in name:
+                nn.init.orthogonal_(param)
+        for name, param in self.gru.named_parameters():
             if 'weight' in name:
                 nn.init.orthogonal_(param)
 
@@ -308,7 +312,7 @@ class MYModel_TrGNN(nn.Module):
         self.attention_layer = ChannelAttention(2**(status_hop+1)-1, demand_hop+1+128, channels=N_ROAD, bias=True) # channels=n_road
                 
         # linear output
-        self.output_layer = ChannelFullyConnected(in_features=4+24+1, channels=N_ROAD) # channels=n_road
+        self.output_layer = ChannelFullyConnected(in_features=32*2, channels=N_ROAD) # channels=n_road
     
     def merge(self, sequences):
         lengths = [len(seq) for seq in sequences]
@@ -384,10 +388,12 @@ class MYModel_TrGNN(nn.Module):
         H = torch.cat([H.transpose(1, 2), ToD, DoW], dim=2) # (n_road, history_window+24+1)
         
         # linear output. specify weights and bias for each road segment
-        #print(f"The shape of H is {H.shape}")
-        Y = self.output_layer(H) # (1, 1, n_road)
+        # print(f"The shape of H is {H.shape}")
+        # Y = self.output_layer(H) # (1, 1, n_road)
+        Y,_  = self.gru(H)
+        Y = self.output_layer(Y)
 
-        #print(f"The Y is {Y.shape}")
+        # print(f"The Y is {Y.shape}")
         return Y
 
     def mygraph_propagation_sparse(self, x, A, grid_output, hop=10, dual=False):
@@ -409,27 +415,52 @@ class MYModel_TrGNN(nn.Module):
         #print(f"The shape of v is {v.shape}")
         return v
 
-class ORModel_TrGNN(nn.Module):
+class MYModel_TrGNN_test(nn.Module):
     # TrGNN.
     
     def __init__(self,g, rn_grid, grid_num, input_size=1, output_size=1, demand_hop=75, status_hop=3):
-        super(ORModel_TrGNN, self).__init__()
+        super(MYModel_TrGNN_test, self).__init__()
         
         self.rn_grid = rn_grid
         self.grid_num = grid_num # TODO
+        self.pad_grid, _  = self.merge(self.rn_grid)
         self.input_size = input_size
         self.output_size = output_size
         self.demand_hop = demand_hop
         self.status_hop = status_hop
         self.id_emb_dim = 64
         self.id_size = N_ROAD
+        self.g = g
+        # self.gnn = MyGAT(128,128)
+        self.grid_id = nn.Parameter(torch.rand(self.grid_num[0], self.grid_num[1], self.id_emb_dim))
+        self.grid_len = torch.tensor([fea.shape[0] for fea in self.rn_grid])
+        self.grid = nn.GRU(self.id_emb_dim, self.id_emb_dim * 2)
+        self.mydropout = nn.Dropout(0.5)
+        self.gru = nn.GRU(4+24+1, 64, batch_first=True, dropout=0.5, bidirectional=False)
+        for name, param in self.grid.named_parameters():
+            if 'weight' in name:
+                nn.init.orthogonal_(param)
+        for name, param in self.gru.named_parameters():
+            if 'weight' in name:
+                nn.init.orthogonal_(param)
+
         
         # attention
         self.attention_layer = ChannelAttention(2**(status_hop+1)-1, demand_hop+1, channels=N_ROAD, bias=True) # channels=n_road
                 
         # linear output
-        self.output_layer = ChannelFullyConnected(in_features=4+24+1, channels=N_ROAD) # channels=n_road
+        self.output_layer = ChannelFullyConnected(in_features=32*2, channels=N_ROAD) # channels=n_road
     
+    def merge(self, sequences):
+        lengths = [len(seq) for seq in sequences]
+        dim = sequences[0].size(1)
+        padded_seqs = torch.zeros(len(sequences), max(lengths), dim)
+
+        for i, seq in enumerate(sequences):
+            end = lengths[i]
+            padded_seqs[i, :end] = seq[:end]
+        # print(f"The shape of paddd is {padded_seqs.shape}")
+        return padded_seqs, lengths
 
     def forward(self, X, T, W, h_init, W_norm, ToD, DoW):
         # X: graph signal. normalized. tensor: (history_window, n_road)
@@ -440,21 +471,26 @@ class ORModel_TrGNN(nn.Module):
         # DoW: road-wise indicator. 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
 
         # print(f"The shape of X, T, w_norm, ToD, DoW {X.shape}, {T.shape}, {W_norm.shape}, {ToD.shape}, {DoW.shape}")
+        batch_size = X.size(0)
+        max_grid_len =self.pad_grid.size(1)
+        grid_output=None
         
         X = X.permute(1,2,0)
         T = T.permute(1,2,3,0)
-        grid_output=None
 
         # graph propagation
         # TODO
         H = torch.cat([graph_propagation_sparse(x, A.transpose(0, 1),grid_output, hop=self.demand_hop).unsqueeze(0) for x, A in zip(torch.unbind(X, dim=0), T)], dim=0)
         H = H.transpose(0,1)
+        history_window = H.size(1)
         #H = H.unsqueeze(0)
-        # print(f"The shape of H is {H.shape}") # (1, 4, 2613, 128)
+        # H = torch.cat((H, road_emb),dim=-1)
+        #print(f"The shape of H is {H.shape}") # (1, 4, 2613, 128)
 
         # attention
         S = torch.cat([graph_propagation_sparse(x, W_norm,grid_output, hop=self.status_hop, dual=True).unsqueeze(0) for x in torch.unbind(X, dim=0)], dim=0)
         S = S.transpose(0,1)
+        #S = torch.cat((S, road_emb.view(1,1,N_ROAD,128).expand(batch_size, history_window,N_ROAD, 128)),dim=-1)
         #print(f"the s shape is {S.shape}")
         att = self.attention_layer(S.unsqueeze(4)) # specify weights and bias for each road segment
         #print(f"the shape of attn is {att.shape}")
@@ -462,6 +498,7 @@ class ORModel_TrGNN(nn.Module):
         #print(f"the shape of H {H.shape}, attn {att.shape}")
         H = torch.mul(H, att) # (history_window, n_road, demand_hop+1)
         H = torch.sum(H, dim=3) # (history_window, n_road)
+        #print(f"The final shape of H is {H.shape}")
 
         
         # print(f"the shape of H, ToD, DoW is {H.shape}, {ToD.shape}, {DoW.shape}")
@@ -469,8 +506,29 @@ class ORModel_TrGNN(nn.Module):
         H = torch.cat([H.transpose(1, 2), ToD, DoW], dim=2) # (n_road, history_window+24+1)
         
         # linear output. specify weights and bias for each road segment
-        #print(f"The shape of H is {H.shape}")
-        Y = self.output_layer(H) # (1, 1, n_road)
+        # print(f"The shape of H is {H.shape}")
+        # Y = self.output_layer(H) # (1, 1, n_road)
+        Y,_  = self.gru(H)
+        Y = self.output_layer(Y)
 
-        #print(f"The Y is {Y.shape}")
+        # print(f"The Y is {Y.shape}")
         return Y
+
+    def mygraph_propagation_sparse(self, x, A, grid_output, hop=10, dual=False):
+        # x shape (bs, nroad, 1)
+        # A shape (bs, nroad, nroad)
+        # grid (nroad, id_emb)
+        # self.g graph
+        #print(f"The shape of mygraph is {x.shape}, {A.shape}, {grid_output.shape}")
+        x = x.permute(1, 0)
+        size = x.size(0)
+        if not dual:
+            A = A.permute(2, 0, 1)
+        else:
+            A = A.unsqueeze(0).repeat(size, 1, 1)
+        x = x.unsqueeze(-1)
+        x = torch.cat([x, grid_output], dim=2)
+        #print(f"The final shape of x is {x.shape}")
+        v =  self.gnn(self.g, x)
+        #print(f"The shape of v is {v.shape}")
+        return v
