@@ -45,6 +45,23 @@ def distance(a,b):
     d = EARTH_MEAN_RADIUS_METER * c
     return d
 
+class CandidatePoint(SPoint):
+    def __init__(self, lat, lng, eid, error, offset, rate):
+        super(CandidatePoint, self).__init__(lat, lng)
+        self.eid = eid
+        self.error = error
+        self.offset = offset
+        self.rate = rate
+
+    def __str__(self):
+        return '{},{},{},{},{},{}'.format(self.eid, self.lat, self.lng, self.error, self.offset, self.rate)
+
+    def __repr__(self):
+        return '{},{},{},{},{},{}'.format(self.eid, self.lat, self.lng, self.error, self.offset, self.rate)
+
+    def __hash__(self):
+        return hash(self.__str__())
+
 
 # todo
 def rate2gps(rn, rid, rate):
@@ -121,6 +138,14 @@ class RoadNetwork(nx.DiGraph):
 
     def get_edges_dis(self):
         return self.edges_dis
+    def range_query(self, mbr):
+        """
+        spatial range query
+        :param mbr: query mbr
+        :return: qualified edge keys
+        """
+        eids = self.edge_spatial_idx.intersection((mbr.min_lng, mbr.min_lat, mbr.max_lng, mbr.max_lat))
+        return [self.edge_idx[eid] for eid in eids]
 
 
 class MBR:

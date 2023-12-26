@@ -32,6 +32,7 @@ torch.cuda.manual_seed(SEED)
 torch.backends.cudnn.deterministic = True
 
 RN_DIR="/home/mys/traj_flow/smallhahahaMTR_PORTOM"
+#RN_DIR="/home/mys/traj_flow/chengdu/chengdu_hahahaMTR_PORTOM"
 
 # Arguments
 parser = argparse.ArgumentParser(description='train_model')
@@ -41,8 +42,10 @@ parser.add_argument('-p', '--pre_trained', help='pre-trained model path. E.g. Tr
 parser.add_argument('-c', '--calibrate', help='flow calibration on a daily basis', default=1)
 args = parser.parse_args()
 model_name, dataset, model_path, calibrate = args.model_name, args.dataset, args.pre_trained, bool(args.calibrate)
-model_save_path="./model/"
+model_save_path=f"./model/" + str(model_name) + time.strftime("%Y%m%d_%H%M%S") + "/"
+os.mkdir(model_save_path)
 batch_size = 32
+print(f"the model path is {model_save_path}")
 
 # Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -50,13 +53,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 grid_size = 50
 start_time = time.time()
 rn = load_rn_shp(RN_DIR, is_directed=True)
-#mbr = MBR(39.86, 116.31, 39.95, 116.45)
+#mbr = MBR(30.35, 104.00, 30.55, 104.30)
 mbr = MBR(39.88, 116.33, 39.95, 116.45)
 rn_grid = get_rn_grid(mbr, rn, grid_size)
 #print(rn_grid[100])
 g_total = get_my_adj().to(device)
 print(g_total)
 max_lat, max_lng = 39.967, 116.472
+#max_lat, max_lng = 30.785, 104.166
 grid_num = gps2grid(SPoint(max_lat, max_lng), mbr, grid_size)
 grid_num = (grid_num[0] + 1, grid_num[1] + 1)
 #print(f"The grid num is {grid_num}")
@@ -65,7 +69,7 @@ grid_num = (grid_num[0] + 1, grid_num[1] + 1)
 # Model and log
 # models = {'TrGNN':Model_TrGNN, 'TrGNN-':Model_GNN}
 # model = models[model_name](rn_grid, grid_num)
-model = MYModel_TrGNN_test(g_total, rn_grid, grid_num)
+model = MYModel_TrGNN(g_total, rn_grid, grid_num)
 if model_path == '': # if no pre-trained model path
     prefix = '%s_%s'%(model_name, int(start_time))
     checkpoint_epoch = -1
@@ -89,6 +93,9 @@ if dataset == 'demo':
     calibrate = False
 elif dataset == 'sg_expressway_8weeks':
     start_date, end_date = '20160314', '20160424' # train period + validation period
+elif dataset == 'chengdu':
+    start_date, end_date = '20140818', '20140828'
+    calibrate = False
 else:
     start_date, end_date = '20160401', '20160421' # train period + validation period
 trajectory_transition = extract_trajectory_transition(start_date, end_date)
@@ -101,7 +108,8 @@ for i in range(len(trajectory_transition)):
 
 if dataset == 'demo':
     start_date, end_date = '20121001', '20121031'
-    calibrate = False
+elif dataset == 'chengdu':
+    start_date, end_date = '20140818', '20140828'
 elif dataset == 'sg_expressway_8weeks':
     start_date, end_date = '20160314', '20160508' # train (5 weeks) + validation (1 week) + test (2 weeks)
 else:
@@ -142,6 +150,14 @@ elif dataset == 'sg_expressway_8weeks': # version 20160314-20160508
                          35, 36, 37, 38, 39,
                          42, 43, 44, 45, 46, 
                          50, 51, 52, 53]) # PH: 2nd May, Monday
+elif dataset == 'chengdu':
+    indices = {'train': list(range(644)), # first 5 weeks 20160314-20160417 (24-1)*(60/15)*56
+               'val': list(range(644, 828)), # 6th week 20160418-20160424 (24-1)*(60/15)*7
+               'test': list(range(828, 1012))} # 7th-8th weeks 20160425-20160508 (24-1)*(60/15)*14
+    # indices of weekdays (exclude weekends and PHs)
+    weekdays = np.array([0, 1, 2, 3, 4, 
+                         7, 8, 9, 10])
+
 else: # version 20160401-20160428
     indices = {'train': list(range(1288)), # first two weeks (24-1)*(60/15)*14
                'val': list(range(1288, 1932)), # third week (24-1)*(60/15)*7
@@ -157,8 +173,8 @@ learning_rate = 0.0001
 num_epochs = 100
 min_mae = 100 # initialize
 early_stop_threshold = 0.0003 # for val_mae
-result_function = result_analysis2 #if dataset == 'sg_expressway_8weeks' else result_analysis
-#N_ROAD=3711
+result_function = result_analysis2 if dataset == 'demo' else result_analysis3
+#N_ROAD=4388
 N_ROAD=2613
 
 
@@ -229,7 +245,7 @@ def validate2(model, data_iter, mode):
         DoW  = DoW.float().to(device)
         y_true = y_true.to(device)
         raw_true  = raw_true.numpy()
-        y_pred = model(X, T, W, h_init, W_norm, ToD, DoW)
+        y_pred = model(X, T, W, h_init, W_norm, ToD, DoW, constraint_mat)
 
         #print(f"The my_pred shape is {y_pred.shape}")
         my_pred = y_pred.detach().cpu().numpy()
@@ -271,6 +287,8 @@ transitions_ToD = [to_sparse_tensor(normalize_adj(trajectory_transition[i])) for
 W = torch.from_numpy(road_adj) # for W
 W_norm = torch.from_numpy(normalize_adj(road_adj, mode='aggregation')).to(device) # for normalized W
 print_log('Preprocessing completed. Clock: %.0f seconds'%(time.time() - start_time), log_path)
+constraint_mat = get_constraint_mat(N_ROAD, rn).to(device)
+#W_norm = constraint_mat.to(device)
 
 # print(f"The shape of flows, transition, weekdays {normalized_flows.shape}, {transitions_ToD.shape}")
 ## todo train, val, test
@@ -303,7 +321,7 @@ for epoch in range(num_epochs):
         #print(f"The shape of X, T, dow, y_true {X.shape}, {T.shape}, {DoW.shape}, {y_true.shape}")
         #print(f"the type of everything is {X.dtype}, {T.dtype}, {W_norm.dtype}, {ToD.dtype}, {DoW.dtype}")
 
-        y_pred = model2(X, T, W, h_init, W_norm, ToD, DoW)
+        y_pred = model2(X, T, W, h_init, W_norm, ToD, DoW, constraint_mat)
         #print(f"The type of y_pred is {y_pred.dtype}")
         loss = loss_fn(y_pred, y_true)
         loss.backward()

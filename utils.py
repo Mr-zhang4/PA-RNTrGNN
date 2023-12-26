@@ -4,13 +4,100 @@ import geopy.distance
 import time
 import torch
 from osgeo import ogr
-from road import SPoint, distance, RoadNetwork, rate2gps, gps2grid
+from road import SPoint, distance, RoadNetwork, rate2gps, gps2grid, MBR, CandidatePoint
+from spatial_func import project_pt_to_segment
+import math
 from datetime import date, timedelta
 from datetime import datetime as dt
 import scipy.sparse as sp
 import torch
 from rtree import Rtree
 import networkx as nx
+LAT_PER_METER = 8.993203677616966e-06
+LNG_PER_METER = 1.1700193970443768e-05
+
+def get_constraint_mat(n_road, rn, search_dis=600):
+    constraint_mat = torch.zeros(n_road, n_road)
+    for u,v,data in rn.edges(data=True):
+        coords = data['coords']
+        # print(data['eid'])
+        start = coords[0]
+        end = coords[-1]
+        mid = ((start.lat + end.lat) / 2, (start.lng + end.lng) / 2)
+        point = SPoint(mid[0], mid[1])
+        cons_vec = get_dis_prob_vec([point, None], rn, {'search_dist':search_dis, 'id_size': n_road} )
+        constraint_mat[data['eid']] = cons_vec
+    # print(constraint_mat)
+    return constraint_mat
+
+def get_dis_prob_vec(gps, rn, parameters):
+    """
+    Args:
+    -----
+    gps: [SPoint, tid]
+    """
+    cons_vec = torch.zeros(parameters['id_size']) + 1e-10
+    candis = get_candidates(gps[0], rn, parameters['search_dist'])
+    if candis is not None:
+        for candi_pt in candis:
+            # if candi_pt.eid in raw2new_rid_dict.keys():
+            new_rid = candi_pt.eid
+            prob = exp_prob(30, candi_pt.error)
+            cons_vec[new_rid] = prob
+    else:
+        cons_vec = torch.ones(parameters['id_size'])
+    return cons_vec
+
+def exp_prob(beta, x):
+    """
+    error distance weight.
+    """
+    return  math.exp(-pow(x,2)/pow(beta,2))
+
+def get_candidates(pt, rn, search_dist):
+    """
+    Args:
+    -----
+    pt: point STPoint()
+    rn: road network
+    search_dist: in meter. a parameter for HMM_mm. range of pt's potential road
+    Returns:
+    --------
+    candidates: list of potential projected points.
+    """
+    candidates = None
+    mbr = MBR(pt.lat - search_dist * LAT_PER_METER,
+              pt.lng - search_dist * LNG_PER_METER,
+              pt.lat + search_dist * LAT_PER_METER,
+              pt.lng + search_dist * LNG_PER_METER)
+    candidate_edges = rn.range_query(mbr)  # list of edges (two nodes/points)
+    if len(candidate_edges) > 0:
+        candi_pt_list = [cal_candidate_point(pt, rn, candidate_edge) for candidate_edge in candidate_edges]
+        # refinement
+        candi_pt_list = [candi_pt for candi_pt in candi_pt_list if candi_pt.error <= search_dist]
+        if len(candi_pt_list) > 0:
+            candidates = candi_pt_list
+    return candidates
+
+def cal_candidate_point(raw_pt, rn, edge):
+    """
+    Get attributes of candidate point
+    """
+    u, v = edge
+    coords = rn[u][v]['coords']  # GPS points in road segment, may be larger than 2
+    candidates = [project_pt_to_segment(coords[i], coords[i + 1], raw_pt) for i in range(len(coords) - 1)]
+    idx, (projection, coor_rate, dist) = min(enumerate(candidates), key=lambda x: x[1][2])
+    # enumerate return idx and (), x[1] --> () x[1][2] --> dist. get smallest error project edge
+    offset = 0.0
+    for i in range(idx):
+        offset += distance(coords[i], coords[i + 1])  # make the road distance more accurately
+    offset += distance(coords[idx], projection)  # distance of road start position and projected point
+    if rn[u][v]['length'] == 0:
+        rate = 0
+        # print(u, v)
+    else:
+        rate = offset/rn[u][v]['length']  # rate of whole road, coor_rate is the rate of coords.
+    return CandidatePoint(projection.lat, projection.lng, rn[u][v]['eid'], dist, offset, rate)
 
 def load_rn_shp(path, is_directed=True):
     edge_spatial_idx = Rtree()

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from utils import to_sparse_tensor
 from dgl.nn.pytorch import GATConv
-#N_ROAD=3711
+#N_ROAD=4388
 N_ROAD=2613
 
 class MyGAT(nn.Module):
@@ -299,7 +299,7 @@ class MYModel_TrGNN(nn.Module):
         self.grid_len = torch.tensor([fea.shape[0] for fea in self.rn_grid])
         self.grid = nn.GRU(self.id_emb_dim, self.id_emb_dim * 2)
         self.mydropout = nn.Dropout(0.5)
-        self.gru = nn.GRU(4+24+1, 64, batch_first=True, bidirectional=False)
+        self.gru = nn.GRU(53, 64, batch_first=True, bidirectional=False)
         for name, param in self.grid.named_parameters():
             if 'weight' in name:
                 nn.init.orthogonal_(param)
@@ -307,12 +307,13 @@ class MYModel_TrGNN(nn.Module):
             if 'weight' in name:
                 nn.init.orthogonal_(param)
 
+
         
         # attention
         self.attention_layer = ChannelAttention(2**(status_hop+1)-1, demand_hop+1+128, channels=N_ROAD, bias=True) # channels=n_road
                 
         # linear output
-        self.output_layer = ChannelFullyConnected(in_features=32*2, channels=N_ROAD) # channels=n_road
+        self.output_layer = ChannelFullyConnected(in_features=64, channels=N_ROAD) # channels=n_road
     
     def merge(self, sequences):
         lengths = [len(seq) for seq in sequences]
@@ -325,7 +326,7 @@ class MYModel_TrGNN(nn.Module):
         # print(f"The shape of paddd is {padded_seqs.shape}")
         return padded_seqs, lengths
 
-    def forward(self, X, T, W, h_init, W_norm, ToD, DoW):
+    def forward(self, X, T, W, h_init, W_norm, ToD, DoW, constraint_mat):
         # X: graph signal. normalized. tensor: (history_window, n_road)
         # T: trajectory transition. normalized. tuple of history_window sparse_tensors: (n_road, n_road)
         # W: weighted road adjacency matrix. # sparse_tensor: (n_road, n_road)
@@ -343,7 +344,7 @@ class MYModel_TrGNN(nn.Module):
         # print(f"TGhe shape before is {grid_input.shape}")
         grid_input = grid_input.reshape(self.id_size, max_grid_len, -1).transpose(0, 1)
         # print(f"the shape of grid input is {grid_input.shape}")
-        #print(f"the shape of X is {X.shape}")
+        # print(f"the shape of X is {X.shape}")
 
         packed_grid_input = nn.utils.rnn.pack_padded_sequence(grid_input, self.grid_len,
                                                       batch_first=False, enforce_sorted=False)
@@ -361,6 +362,7 @@ class MYModel_TrGNN(nn.Module):
         T = T.permute(1,2,3,0)
 
         # graph propagation
+        #print(f"The X shape is {X.shape}") # [4,2613,32]
         # TODO
         H = torch.cat([graph_propagation_sparse(x, A.transpose(0, 1),grid_output, hop=self.demand_hop).unsqueeze(0) for x, A in zip(torch.unbind(X, dim=0), T)], dim=0)
         H = H.transpose(0,1)
@@ -380,15 +382,20 @@ class MYModel_TrGNN(nn.Module):
         #print(f"the shape of H {H.shape}, attn {att.shape}")
         H = torch.mul(H, att) # (history_window, n_road, demand_hop+1)
         H = torch.sum(H, dim=3) # (history_window, n_road)
-        #print(f"The final shape of H is {H.shape}")
+        #print(f"The final shape of H is {H.shape}") # [32, 4, 2613]
+        HH = H.permute(1,2,0)
+        HH = torch.cat([graph_propagation_sparse(x, constraint_mat,grid_output, hop=2, dual=True).unsqueeze(0) for x in torch.unbind(HH, dim=0)], dim=0)
 
+        HH = HH.permute(1,2,0,3) # [32, 2613,4, 7]
+        HH = HH.reshape(batch_size,N_ROAD, -1)
+        #print(f"Teh HH is shape is {HH.shape}")
         
         # print(f"the shape of H, ToD, DoW is {H.shape}, {ToD.shape}, {DoW.shape}")
         # add ToD, DoW features
-        H = torch.cat([H.transpose(1, 2), ToD, DoW], dim=2) # (n_road, history_window+24+1)
+        H = torch.cat([HH, ToD, DoW], dim=2) # (n_road, history_window+24+1)
         
         # linear output. specify weights and bias for each road segment
-        # print(f"The shape of H is {H.shape}")
+        #print(f"The shape of H is {H.shape}")
         # Y = self.output_layer(H) # (1, 1, n_road)
         Y,_  = self.gru(H)
         Y = self.output_layer(Y)

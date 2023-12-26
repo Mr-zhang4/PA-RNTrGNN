@@ -4,7 +4,7 @@
 import pandas as pd
 import numpy as np
 from utils import print_log
-#N_ROAD=3711
+#N_ROAD=4388
 N_ROAD=2613
 
 def read_main_road_index(file_path='data/road_list_main.csv'):
@@ -88,7 +88,7 @@ def result_analysis2(Y_pred, Y_true, model_type='ours', log_path='nohup.out'):
     ToD = 96 if model_type in ['baseline', 'VAR']  else 92 # number of timestamps in day for test
     interval_offset = 4 if model_type in ['VAR', 'ours'] else 0 # number of shifted timestamp indices of day
 
-    print(f"in analysis, the shape of pred is {Y_pred.shape}")
+    print(f"in analysis, the shape of pred is {Y_pred.shape}") # 175, 4388
     
     # overall
     mae = MAE(Y_pred, Y_true, main_roads=False)
@@ -135,6 +135,81 @@ def result_analysis2(Y_pred, Y_true, model_type='ours', log_path='nohup.out'):
     _Y_pred = np.zeros((8*7, N_ROAD)) # (n_sample, n_road)
     _Y_true = np.zeros((8*7, N_ROAD))
     for i in range(7):
+        _Y_pred[i*8:(i+1)*8] = Y_pred[(14*4-interval_offset+ToD*i):(16*4-interval_offset+ToD*i)]
+        _Y_true[i*8:(i+1)*8] = Y_true[(14*4-interval_offset+ToD*i):(16*4-interval_offset+ToD*i)]
+    _Y_pred = _Y_pred[weekday_indices]
+    _Y_true = _Y_true[weekday_indices]
+    mae = MAE(_Y_pred, _Y_true, main_roads=False)
+    mape = MAPE(_Y_pred, _Y_true, main_roads=False)
+    rmse = RMSE(_Y_pred, _Y_true, main_roads=False)
+    print_log('>> Peak hours %d-%d. MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(14, 16, mae, mape, rmse), log_path)
+    
+    # MRT breakdown
+    # duration: 25th Apr, 20:15-21:30
+    # affected roads: west Singapore (longitude < 103.85)
+    # _Y_pred = Y_pred[(ToD-interval_offset-15):(ToD-interval_offset-10)]
+    # _Y_true = Y_true[(ToD-interval_offset-15):(ToD-interval_offset-10)]
+    # mae = MAE(_Y_pred, _Y_true, main_roads=True) # use affected roads only. 'data/road_list_main.csv'
+    # mape = MAPE(_Y_pred, _Y_true, main_roads=True) # use affected roads only. 'data/road_list_main.csv'
+    # rmse = RMSE(_Y_pred, _Y_true, main_roads=True) # use affected roads only. 'data/road_list_main.csv'
+    # print_log('>> 25th Apr MRT breakdown. MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(mae, mape, rmse), log_path)
+    
+    return
+def result_analysis3(Y_pred, Y_true, model_type='ours', log_path='nohup.out'): 
+    # for HA, static, MA, model_type = 'baseline'. (96*14, 2404) full.
+    # for our models, model_type = 'ours'. (92*14, 2404) missing the first hour for each day.
+    # for VAR and RF, model_type = 'VAR'. (96*14-4, 2404) missing the first hour for the first day.
+    # 14 days in test period
+    ToD = 96 if model_type in ['baseline', 'VAR']  else 92 # number of timestamps in day for test
+    interval_offset = 4 if model_type in ['VAR', 'ours'] else 0 # number of shifted timestamp indices of day
+
+    print(f"in analysis, the shape of pred is {Y_pred.shape}") # 175, 4388
+    
+    # overall
+    mae = MAE(Y_pred, Y_true, main_roads=False)
+    mape = MAPE(Y_pred, Y_true, main_roads=False)
+    rmse = RMSE(Y_pred, Y_true, main_roads=False)
+    print_log('>> Overall. MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(mae, mape, rmse), log_path)
+
+    # hourly.
+    # weekdays average. exclude weekends (day 5,6,12,13) and PH (day 7).
+    # weekdays = np.array([0,1,2,3,4])
+    # weekday_indices = (np.repeat(weekdays.reshape(-1, 1), 4, axis=1)*4 + np.arange(4).reshape(1, -1)).reshape(-1)
+    # hours = np.arange(1, 24)
+    # for hour in hours:
+    #     
+    #     _Y_pred = np.zeros((4*7, N_ROAD)) # (n_sample, n_road)
+    #     _Y_true = np.zeros((4*7, N_ROAD))
+    #     for i in range(7):
+    #         _Y_pred[i*4:(i+1)*4] = Y_pred[(hour*4-interval_offset+ToD*i):((hour+1)*4-interval_offset+ToD*i)]
+    #         _Y_true[i*4:(i+1)*4] = Y_true[(hour*4-interval_offset+ToD*i):((hour+1)*4-interval_offset+ToD*i)]
+    #     _Y_pred = _Y_pred[weekday_indices]
+    #     _Y_true = _Y_true[weekday_indices]
+    #     mae = MAE(_Y_pred, _Y_true, main_roads=False)
+    #     mape = MAPE(_Y_pred, _Y_true, main_roads=False)
+    #     rmse = RMSE(_Y_pred, _Y_true, main_roads=False)
+    #     print_log('>> Peak hours %d-%d. MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(hour, hour+1, mae, mape, rmse), log_path)
+    
+    # peak hours: 7-9am & 2-4pm.
+    # weekdays average. exclude weekends (day 5,6,12,13) and PH (day 7).
+    weekdays = np.array([0])
+    weekday_indices = (np.repeat(weekdays.reshape(-1, 1), 8, axis=1)*8 + np.arange(8).reshape(1, -1)).reshape(-1)
+
+    _Y_pred = np.zeros((8*2, N_ROAD)) # (n_sample, n_road)
+    _Y_true = np.zeros((8*2, N_ROAD))
+    for i in range(2):
+        _Y_pred[i*8:(i+1)*8] = Y_pred[(7*4-interval_offset+ToD*i):(9*4-interval_offset+ToD*i)]
+        _Y_true[i*8:(i+1)*8] = Y_true[(7*4-interval_offset+ToD*i):(9*4-interval_offset+ToD*i)]
+    _Y_pred = _Y_pred[weekday_indices]
+    _Y_true = _Y_true[weekday_indices]
+    mae = MAE(_Y_pred, _Y_true, main_roads=False)
+    mape = MAPE(_Y_pred, _Y_true, main_roads=False)
+    rmse = RMSE(_Y_pred, _Y_true, main_roads=False)
+    print_log('>> Peak hours %d-%d. MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(7, 9, mae, mape, rmse), log_path)
+    
+    _Y_pred = np.zeros((8*2, N_ROAD)) # (n_sample, n_road)
+    _Y_true = np.zeros((8*2, N_ROAD))
+    for i in range(2):
         _Y_pred[i*8:(i+1)*8] = Y_pred[(14*4-interval_offset+ToD*i):(16*4-interval_offset+ToD*i)]
         _Y_true[i*8:(i+1)*8] = Y_true[(14*4-interval_offset+ToD*i):(16*4-interval_offset+ToD*i)]
     _Y_pred = _Y_pred[weekday_indices]
