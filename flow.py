@@ -10,7 +10,7 @@ from utils import time_difference, round_time, df_to_csv
 from road_graph import get_road_list, road_graph
 
 
-def generate_time_intervals(start_date='20160325', end_date='20160325', interval=5):
+def generate_time_intervals(start_date='20080208', end_date='20080208', interval=5):
     start_time = int(time.mktime(dt.strptime(start_date, '%Y%m%d').timetuple()))
     end_time = int(time.mktime((dt.strptime(end_date, '%Y%m%d') + timedelta(1)).timetuple()))
     interval = interval * 60 # convert minutes to seconds

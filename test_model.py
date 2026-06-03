@@ -36,7 +36,6 @@ torch.backends.cudnn.deterministic = True
 RN_DIR="/home/RNTrGNN/data/data/road_network/smallhahahaMTR_PORTOM"
 # Arguments
 parser = argparse.ArgumentParser(description='train_model')
-parser.add_argument('-a', '--ablation', help='Ablation study variant', default='full', choices=['full', 'no_direction', 'no_roadtype', 'no_adaptive', 'no_constraint'])
 parser.add_argument('-m', '--model_name', help='TrGNN', required=True)
 parser.add_argument('-D', '--dataset', help='sg_expressway_8weeks', default='sg_expressway_8weeks')
 parser.add_argument('-p', '--pre_trained', help='pre-trained model path. E.g. TrGNN_1581343606_100epoch.cpt', default='')
@@ -51,14 +50,12 @@ print(f"the model path is {model_save_path}")
 
 # Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#device = torch.device("cpu")
 
 grid_size = 50
 start_time = time.time()
 rn = load_rn_shp(RN_DIR, is_directed=True)
 #mbr = MBR(30.35, 104.00, 30.55, 104.30)
 mbr = MBR(39.88, 116.33, 39.95, 116.45)
-#mbr = MBR(39.4420, 115.4168, 39.9420, 115.9168)
 rn_grid = get_rn_grid(mbr, rn, grid_size)
 #print(rn_grid[100])
 g_total = get_my_adj().to(device)
@@ -73,8 +70,7 @@ grid_num = (grid_num[0] + 1, grid_num[1] + 1)
 # Model and log
 # models = {'TrGNN':Model_TrGNN, 'TrGNN-':Model_GNN}
 # model = models[model_name](rn_grid, grid_num)
-#model = MYModel_TrGNN_dynamic_constraint(g_total, rn_grid, grid_num)
-#model = MYModel_TrGNN_no_constraint(g_total, rn_grid, grid_num)
+model = MYModel_TrGNN_no_constraint(g_total, rn_grid, grid_num)
 if model_path == '': # if no pre-trained model path
     prefix = '%s_%s'%(model_name, int(start_time))
     checkpoint_epoch = -1
@@ -85,31 +81,6 @@ if os.path.isfile(model_path):
 model_path = 'model/%s_%sepoch.cpt'%(prefix, '%d')
 log_path = 'log/%s.log'%prefix
 
-
-ablation_mode = args.ablation
-print_log(f"Running ablation study: {ablation_mode}", log_path)
-
-# 根据消融实验模式调整约束矩阵
-def get_ablation_constraint_mat(ablation_mode):
-    if ablation_mode == 'no_direction':
-        # 移除方向相似性：将alpha设为1.0，只保留距离衰减
-        return get_constraint_mat(N_ROAD, rn, alpha=1.0)
-    elif ablation_mode == 'no_roadtype':
-        # 移除道路类型权重：返回中性权重的约束矩阵
-        return get_constraint_mat(N_ROAD, rn, alpha=0.65, roadtype_weight=False)
-    elif ablation_mode == 'no_constraint':
-        # 完全移除约束：返回单位矩阵
-        return torch.eye(N_ROAD)
-    else:
-        # 完整模型
-        return get_constraint_mat(N_ROAD, rn, alpha=0.65)
-# 创建模型时传入消融模式
-model = MYModel_TrGNN_optimized(
-    g_total, rn_grid, grid_num,
-    ablation_mode=ablation_mode
-).to(device)
-
-
 model2 = model.to(device)
 print_log(device, log_path)
 
@@ -119,15 +90,12 @@ print_log(device, log_path)
 road_adj = extract_road_adj() # directed adj
 
 if dataset == 'demo':
-    start_date, end_date = '20121001', '20121031'
+    start_date, end_date = '20121001', '20121028'
     calibrate = False
 elif dataset == 'sg_expressway_8weeks':
     start_date, end_date = '20160314', '20160424' # train period + validation period
 elif dataset == 'chengdu':
     start_date, end_date = '20140818', '20140828'
-    calibrate = False
-elif dataset == 'beijing':
-    start_date, end_date = '20080202', '20080208'
     calibrate = False
 else:
     start_date, end_date = '20160401', '20160421' # train period + validation period
@@ -140,13 +108,11 @@ for i in range(len(trajectory_transition)):
     trajectory_transition[i] = trajectory_transition[i] + road_adj_mask
 
 if dataset == 'demo':
-    start_date, end_date = '20121001', '20121031'
+    start_date, end_date = '20121001', '20121028'
 elif dataset == 'chengdu':
     start_date, end_date = '20140818', '20140828'
 elif dataset == 'sg_expressway_8weeks':
-    start_date, end_date = '20160314', '20160508'# train (5 weeks) + validation (1 week) + test (2 weeks)
-elif dataset == 'beijing':
-    start_date, end_date = '20080202', '20080208'
+    start_date, end_date = '20160314', '20160508' # train (5 weeks) + validation (1 week) + test (2 weeks)
 else:
     start_date, end_date = '20160401', '20160428' # train + validation + test
 dates = date_range(start_date, end_date)
@@ -172,9 +138,9 @@ if dataset == 'demo': # 20160314
                      14, 15, 16, 17, 18,
                      21, 22, 23, 24, 25,
                      28, 29, 30, 31]) # PH: 2nd May, Monday
-    indices = {'train': list(range(1632)), # first 5 weeks 20160314-20160417 (24-1)*(60/15)*56
-           'val': list(range(1632,2304)), # 6th week 20160418-20160424 (24-1)*(60/15)*7
-           'test': list(range(2304, 2976))} # 7th-8th weeks 20160425-20160508 (24-1)*(60/15)*14
+    indices = {'train': list(range(1344)), # first 5 weeks 20160314-20160417 (24-1)*(60/15)*56
+           'val': list(range(1344,2016)), # 6th week 20160418-20160424 (24-1)*(60/15)*7
+           'test': list(range(2016, 2688))} # 7th-8th weeks 20160425-20160508 (24-1)*(60/15)*14
 elif dataset == 'sg_expressway_8weeks': # version 20160314-20160508
     indices = {'train': list(range(3220)), # first 5 weeks 20160314-20160417 (24-1)*(60/15)*56
                'val': list(range(3220, 3864)), # 6th week 20160418-20160424 (24-1)*(60/15)*7
@@ -195,15 +161,12 @@ elif dataset == 'chengdu':
     # indices of weekdays (exclude weekends and PHs)
     weekdays = np.array([0, 1, 2, 3, 4, 
                          7, 8, 9, 10])
-elif dataset == 'beijing': # version 20080202-20080208
-    indices = {'train': list(range(288)), # first two weeks (24-1)*(60/15)*14
-               'val': list(range(288, 480)), # third week (24-1)*(60/15)*7
-               'test': list(range(480, 672))}
-    weekdays = np.array([2,3,4,5,6])
-else: 
-    indices = {'train': list(range(1288)), # first two weeks (24-1)*(60/15)*2
-               'val': list(range(1288, 1932)), # third week (24-1)*(60/15)*3
-               'test': list(range(1932, 2576))} # fourth week (24-1)*(60/15)*2
+
+else: # version 20160401-20160428
+    indices = {'train': list(range(1288)), # first two weeks (24-1)*(60/15)*14
+               'val': list(range(1288, 1932)), # third week (24-1)*(60/15)*7
+               'test': list(range(1932, 2576))} # fourth week (24-1)*(60/15)*7
+
 
 scaler = StandardScaler().fit(flow_df.iloc[indices['train'] + indices['val']].values) # normalize flow
 
@@ -211,61 +174,60 @@ scaler = StandardScaler().fit(flow_df.iloc[indices['train'] + indices['val']].va
 # Train model
 loss_fn = nn.MSELoss()
 learning_rate = 0.0001
-num_epochs = 100
+num_epochs = 0
 min_mae = 100 # initialize
 early_stop_threshold = 0.0003 # for val_mae
 result_function = result_analysis2 if dataset == 'demo' else result_analysis3
-#result_function = result_analysis4 if dataset == 'beijing' else result_function
 #N_ROAD=4388
 N_ROAD=2613
-#N_ROAD=1267
 
-#def validate(model, mode='val'):
+
+def validate(model, mode='val'):
     # mode: ['val', 'test']. Validate on validation set or test set.
     
-#    running_loss = 0
-#    n_samples = 0
+    running_loss = 0
+    n_samples = 0
     
-#    h_init = torch.zeros(5, N_ROAD, 1) # (gru_num_layers, n_road, hidden_size)
-#    h_init = h_init.to(device)
+    h_init = torch.zeros(5, N_ROAD, 1) # (gru_num_layers, n_road, hidden_size)
+    h_init = h_init.to(device)
     
-#    Y_true = np.zeros((len(indices[mode]), N_ROAD)) # (n_sample, n_road)
-#    Y_pred = np.zeros((len(indices[mode]), N_ROAD))
-#    for i in indices[mode]:
+    Y_true = np.zeros((len(indices[mode]), N_ROAD)) # (n_sample, n_road)
+    Y_pred = np.zeros((len(indices[mode]), N_ROAD))
+    for i in indices[mode]:
 
-#        d = i // 92
-#        t = i % 92
+        d = i // 92
+        t = i % 92
 
-#        X = normalized_flows[d*96+t : d*96+t+4]
-#        T = tuple(transitions_ToD[t:t+4])
+        X = normalized_flows[d*96+t : d*96+t+4]
+        T = tuple(transitions_ToD[t:t+4])
         # W passed to device already
-#        y_true = normalized_flows[d*96+t+4]
-#        print(f"The shape of T is {T.shape}")
-       
-#        ToD = torch.from_numpy(np.eye(24)[np.full((N_ROAD), ((t+4) * 15 // 60) % 24)]).float().to(device) # one-hot encoding: hour of day. (n_road, 24)
-#        DoW = torch.from_numpy(np.full((N_ROAD, 1), int(d in weekdays))).float().to(device) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
-#        y_pred = model(X, T, W, h_init, W_norm, ToD, DoW)
+        y_true = normalized_flows[d*96+t+4]
+        print(f"The shape of T is {T.shape}")
         
-#        Y_true[n_samples] = flow_df.iloc[d*96+t+4].values
+        ToD = torch.from_numpy(np.eye(24)[np.full((N_ROAD), ((t+4) * 15 // 60) % 24)]).float().to(device) # one-hot encoding: hour of day. (n_road, 24)
+        DoW = torch.from_numpy(np.full((N_ROAD, 1), int(d in weekdays))).float().to(device) # indicator: 1 for weekdays, 0 for weekends/PHs. (n_road, 1)
+        y_pred = model(X, T, W, h_init, W_norm, ToD, DoW)
+        
+        Y_true[n_samples] = flow_df.iloc[d*96+t+4].values
 
-#        mya = y_pred.detach().cpu().numpy().reshape(1,-1)
+        mya = y_pred.detach().cpu().numpy().reshape(1,-1)
         # print(f"the shape of mya is {mya.shape}")
-#        Y_pred[n_samples] = scaler.inverse_transform(mya)
+        Y_pred[n_samples] = scaler.inverse_transform(mya)
         
-#        loss = loss_fn(y_pred, y_true)
-#        loss.detach_()
+        loss = loss_fn(y_pred, y_true)
+        loss.detach_()
 
-#        running_loss += loss.item()
-#        n_samples += 1
+        running_loss += loss.item()
+        n_samples += 1
     
-#    Y_pred[Y_pred < 0] = 0 # correction for negative values
+    Y_pred[Y_pred < 0] = 0 # correction for negative values
     #print(f"the shape of true {Y_true.shape}, pred {Y_pred.shape}")
-#    mae = MAE(Y_pred, Y_true, main_roads=False)
-#    mape = MAPE(Y_pred, Y_true, main_roads=False)
-#    rmse = RMSE(Y_pred, Y_true, main_roads=False)
-#    print_log('>> %s_loss: %.3f, MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(mode, running_loss/n_samples, mae, mape, rmse), log_path)
-#    
-#    return running_loss/n_samples, Y_pred, Y_true, mae
+    mae = MAE(Y_pred, Y_true, main_roads=False)
+    mape = MAPE(Y_pred, Y_true, main_roads=False)
+    rmse = RMSE(Y_pred, Y_true, main_roads=False)
+    print_log('>> %s_loss: %.3f, MAE: %.3f, MAPE: %.3f, RMSE: %.3f'%(mode, running_loss/n_samples, mae, mape, rmse), log_path)
+    
+    return running_loss/n_samples, Y_pred, Y_true, mae
 
 def validate2(model, data_iter, mode):
     model.eval()
@@ -329,12 +291,7 @@ transitions_ToD = [to_sparse_tensor(normalize_adj(trajectory_transition[i])) for
 W = torch.from_numpy(road_adj) # for W
 W_norm = torch.from_numpy(normalize_adj(road_adj, mode='aggregation')).to(device) # for normalized W
 print_log('Preprocessing completed. Clock: %.0f seconds'%(time.time() - start_time), log_path)
-
-alpha_value = 0.65  # »ìºÏÈ¨ÖØ²ÎÊý£¬¿Éµ÷Õû
-
-# constraint_mat = get_constraint_mat(N_ROAD, rn).to(device)  # Ô­´úÂë
-constraint_mat = get_constraint_mat(N_ROAD, rn, alpha=alpha_value).to(device)
-#constraint_mat = get_constraint_mat(N_ROAD, rn).to(device)
+constraint_mat = get_constraint_mat(N_ROAD, rn).to(device)
 #W_norm = constraint_mat.to(device)
 
 #print(f"The shape of flows, transition, weekdays {normalized_flows.shape}, {transitions_ToD.shape}")
@@ -357,24 +314,9 @@ for epoch in range(num_epochs):
     running_loss = 0
     n_samples = len(train_iter)
 
-    current_alpha = max(0.5, 0.8 - epoch * 0.002)  # ´Ó0.8ÏßÐÔË¥¼õµ½0.5
-    # 在训练循环中获取约束矩阵
-    constraint_mat = get_ablation_constraint_mat(ablation_mode).to(device)
-    # ÖØÐÂ¼ÆËãÔ¼Êø¾ØÕó
-    #constraint_mat = get_constraint_mat(N_ROAD, rn, alpha=current_alpha).to(device)
-    # 每10个epoch可视化一次
-    # 每10个epoch可视化一次约束矩阵
-    if epoch % 10 == 0:
-        from utils import plot_constraint_matrix
-        
-        # 生成带时间戳的文件名
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{model_save_path}/constraint_matrix_epoch{epoch}_{timestamp}.png"
-        
-        # 调用可视化函数
-        plot_constraint_matrix(constraint_mat, rn, filename)
     for i, batch in enumerate(train_iter):
         X, T, ToD, DoW, y_true, _ = batch
+
         X = X.to(device)
         T = T.to(device)
         ToD = ToD.float().to(device)
@@ -414,9 +356,11 @@ for epoch in range(num_epochs):
     else:
         stopping_count += 1
         
-    if stopping_count >= 5:
+    if stopping_count >= 10:
         print_log('myEarly stop.', log_path)
         break
+    
+
 
 
 # print_log('Training model...', log_path)
@@ -493,7 +437,9 @@ for epoch in range(num_epochs):
         # break
 
 print_log('Testing...', log_path)
-model2 = torch.load(model_save_path + 'val-best-model.pt').to(device)
+model_save_path = "./model/TrGNN20250617_172757/"
+#model_save_path = "./model/TrGNN20240105_155824/"
+model2 = torch.load(model_save_path + 'val-best-model.pt', map_location=device).to(device)
 
 import time
 start = time.time()

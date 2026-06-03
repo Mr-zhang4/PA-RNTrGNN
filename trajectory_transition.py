@@ -56,13 +56,20 @@ def extract_trajectory_transition(start_date, end_date, interval=15):
                 def extract_time_index(time):
                     hour = int(time[-8:-6])
                     minute = int(time[-5:-3])
-                    time_index = hour * 4 + minute // 15
+                    time_index = hour * 4  + minute // 15
                     return time_index
                 recovered_trajectory_df['time_index'] = recovered_trajectory_df['time'].apply(extract_time_index)
                 print('Time spent till now: %.2f seconds'%(time.time() - start_time))
 
                 print('Creating empty trajectory_transition')
+
+                
                 trajectory_transition = np.zeros((60//interval*24, len(road_list), len(road_list)), dtype=np.int16)
+                #a = np.zeros((60//interval*24, len(road_list), len(road_list)), dtype=np.int8)
+                #trajectory_transition=0
+                #chunk_size = 1000000
+                #for i in range(0,len(a),chunk_size):
+                #    trajectory_transition=a[i:i+chunk_size]
                 print('Time spent till now: %.2f seconds'%(time.time() - start_time))
 
                 print('Calculating trajectory_transition')
@@ -71,7 +78,7 @@ def extract_trajectory_transition(start_date, end_date, interval=15):
                         if previous_row['vehicle_id'] == row['vehicle_id'] and \
                         previous_row['trajectory_id'] == row['trajectory_id'] and \
                         previous_row['road_id'] != row['road_id']:
-                            trajectory_transition[previous_row['time_index'], previous_row['road_index'], row['road_index']] += 1
+                            trajectory_transition[previous_row['time_index'], previous_row['road_index'], row['road_index']] +=1
                     if i % 100000 == 0:
                         print(i, 'at %.2f seconds'%(time.time() - start_time))
                     previous_row = row

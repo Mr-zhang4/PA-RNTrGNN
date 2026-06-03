@@ -11,7 +11,7 @@ from utils import time_difference
 from road_graph import get_road_list, road_graph
 
 
-def read_GPS_dataset(date_range=['20160325', '20160325'], in_path='data/ParsedTaxiData_%s.csv', test_mode=False):
+def read_GPS_dataset(date_range=['20080202', '20080202'], in_path='data/ParsedTaxiData_%s.csv', test_mode=False):
     # date_range = [start_date, end_date]
     print('Reading GPS dataset')
     start_date, end_date = date_range

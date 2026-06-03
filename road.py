@@ -132,6 +132,7 @@ class RoadNetwork(nx.DiGraph):
         # eid -> edge key (start_coord, end_coord)
         self.edge_idx = edge_idx
         self.edges_dis = edges_dis
+        
 
     def get_edge_idx(self):
         return self.edge_idx

@@ -1,0 +1,12 @@
+**/.gitkeep
+model/
+result/
+log/
+
+# datasets
+data/
+*.csv
+*.pkl
+*.npy
+*.npz
+*.checkpoint

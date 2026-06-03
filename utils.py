@@ -16,19 +16,146 @@ import networkx as nx
 LAT_PER_METER = 8.993203677616966e-06
 LNG_PER_METER = 1.1700193970443768e-05
 
-def get_constraint_mat(n_road, rn, search_dis=600):
+# 道路类型权重映射
+HIGHWAY_WEIGHTS = {
+    'motorway': 1.2,
+    'trunk': 1.1,
+    'primary': 1.0,
+    'secondary': 0.9,
+    'tertiary': 0.8,
+    'residential': 0.7,
+    'unclassified': 0.7,
+    'service': 0.6,
+    'motorway_link': 1.1,
+    'trunk_link': 1.0,
+    'primary_link': 0.9
+}
+
+def get_constraint_mat(n_road, rn, search_dis=200, alpha=0.65,roadtype_weight=True):
+    """创新约束矩阵：结合距离衰减和方向相似性"""
     constraint_mat = torch.zeros(n_road, n_road)
-    for u,v,data in rn.edges(data=True):
+    
+    # 预处理：计算所有道路的方向向量
+    for u, v, data in rn.edges(data=True):
         coords = data['coords']
-        # print(data['eid'])
+        if len(coords) < 2:
+            data['direction'] = (0, 0)
+            continue
+            
+        # 计算首尾点方向向量
         start = coords[0]
         end = coords[-1]
-        mid = ((start.lat + end.lat) / 2, (start.lng + end.lng) / 2)
+        dx = end.lng - start.lng
+        dy = end.lat - start.lat
+        norm = math.sqrt(dx**2 + dy**2)
+        
+        # 归一化并存储
+        data['direction'] = (dx/norm, dy/norm) if norm > 1e-6 else (0, 0)
+        data['highway_type'] = data.get('highway', 'secondary')  # 从GML获取道路类型
+    
+    # 为每条道路创建约束向量
+    for u, v, data in rn.edges(data=True):
+        coords = data['coords']
+        start = coords[0]
+        end = coords[-1]
+        mid = ((start.lat + end.lat)/2, (start.lng + end.lng)/2)
         point = SPoint(mid[0], mid[1])
-        cons_vec = get_dis_prob_vec([point, None], rn, {'search_dist':search_dis, 'id_size': n_road} )
+        
+        # 获取当前道路属性
+        current_type = data.get('highway_type', 'secondary')
+        current_direction = data['direction']
+#        w_type = HIGHWAY_WEIGHTS.get(current_type, 1.0)
+
+        
+#        cons_vec = _innovative_dis_prob_vec(
+#            point, rn, 
+#            {'search_dist': search_dis, 'id_size': n_road},
+#            current_direction, w_type, alpha
+#        )
+#        constraint_mat[data['eid']] = cons_vec
+        # 消融实验处理：无道路类型权重
+        if not roadtype_weight:
+            w_type = 1.0  # 中性权重
+        else:
+            w_type = HIGHWAY_WEIGHTS.get(current_type, 1.0)
+        
+        cons_vec = _optimized_dis_prob_vec(
+            point, rn, 
+            {'search_dist': search_dis, 'id_size': n_road},
+            current_direction, w_type, alpha, roadtype_weight
+        )
         constraint_mat[data['eid']] = cons_vec
-    # print(constraint_mat)
+
     return constraint_mat
+
+def _optimized_dis_prob_vec(gps, rn, params, current_dir, w_type, alpha, roadtype_weight):
+    """创新概率向量计算：混合距离和方向特征"""
+    cons_vec = torch.zeros(params['id_size']) + 1e-10
+    candis = get_candidates(gps, rn, params['search_dist'])
+    
+    if candis is None:
+        return cons_vec
+    
+    for candi_pt in candis:
+        rid = candi_pt.eid
+        
+        # 在路网中查找候选道路数据
+        edge_data = None
+        for u, v, data in rn.edges(data=True):
+            if data['eid'] == rid:
+                edge_data = data
+                break
+        
+        if edge_data is None:
+            continue
+        
+        # 1. 距离衰减分量
+        dist_component = exp_prob(10, candi_pt.error)
+        
+        # 2. 方向相似性分量
+        candi_dir = edge_data.get('direction', (0, 0))
+        dir_similarity = 0
+        if current_dir != (0, 0) and candi_dir != (0, 0):
+            cos_sim = current_dir[0]*candi_dir[0] + current_dir[1]*candi_dir[1]
+            dir_similarity = (1 + cos_sim) / 2  # 映射到[0,1]
+        
+        # 3. 混合权重
+        mixed_score = alpha * dist_component + (1-alpha) * dir_similarity
+        
+        # 4. 道路类型加权
+        candi_type = edge_data.get('highway_type', 'secondary')
+#        w_candi = HIGHWAY_WEIGHTS.get(candi_type, 1.0)
+#        final_score = w_type * w_candi * mixed_score
+        
+#        cons_vec[rid] = final_score
+        if not roadtype_weight:
+            # 消融实验：无道路类型权重
+            w_candi = 1.0
+            final_score = mixed_score
+        else:
+            w_candi = HIGHWAY_WEIGHTS.get(candi_type, 1.0)
+            # 增强主干道影响
+            if candi_type in ['motorway', 'trunk', 'primary']:
+                final_score = w_type * w_candi * mixed_score * 1.2
+            else:
+                final_score = w_type * w_candi * mixed_score
+        
+        cons_vec[rid] = final_score
+
+    return cons_vec
+#def get_constraint_mat(n_road, rn, search_dis=300):
+#    constraint_mat = torch.zeros(n_road, n_road)
+#    for u,v,data in rn.edges(data=True):
+#        coords = data['coords']
+        # print(data['eid'])
+#        start = coords[0]
+#        end = coords[-1]
+#        mid = ((start.lat + end.lat) / 2, (start.lng + end.lng) / 2)
+#        point = SPoint(mid[0], mid[1])
+#        cons_vec = get_dis_prob_vec([point, None], rn, {'search_dist':search_dis, 'id_size': n_road} )
+#        constraint_mat[data['eid']] = cons_vec
+    # print(constraint_mat)
+#    return constraint_mat
 
 def get_dis_prob_vec(gps, rn, parameters):
     """
@@ -42,7 +169,7 @@ def get_dis_prob_vec(gps, rn, parameters):
         for candi_pt in candis:
             # if candi_pt.eid in raw2new_rid_dict.keys():
             new_rid = candi_pt.eid
-            prob = exp_prob(30, candi_pt.error)
+            prob = exp_prob(10, candi_pt.error)
             cons_vec[new_rid] = prob
     else:
         cons_vec = torch.ones(parameters['id_size'])
@@ -120,6 +247,17 @@ def load_rn_shp(path, is_directed=True):
             coords.append(SPoint(geom_pt[1], geom_pt[0]))
         data['coords'] = coords
         data['length'] = sum([distance(coords[i], coords[i + 1]) for i in range(len(coords) - 1)])
+ # 新增：提取道路类型
+        highway_type = 'secondary'  # 默认值
+        if 'highway' in data:
+            highway_type = data['highway']
+        elif 'Json' in data:  # 尝试从JSON解析
+            try:
+                json_data = json.loads(data['Json'])
+                highway_type = json_data.get('highway', 'secondary')
+            except:
+                pass
+        data['highway_type'] = highway_type        
         env = geom_line.GetEnvelope()
         edge_spatial_idx.insert(data['eid'], (env[0], env[2], env[1], env[3]))
         edge_idx[data['eid']] = (u,v)
@@ -434,3 +572,57 @@ def geodistance(coords_1, coords_2):
 #     m = display_trajectory(points, m=m, tiles=tiles)
     
 #     return m
+import matplotlib.pyplot as plt
+import seaborn as sns
+def plot_constraint_matrix(constraint_mat, rn, filename="constraint_matrix.png"):
+    """可视化创新约束矩阵"""
+    # 创建热力图
+    plt.figure(figsize=(16, 14))
+
+    # 计算矩阵值范围
+    min_val = constraint_mat.min().item()
+    max_val = constraint_mat.max().item()
+
+    # 创建热力图
+    ax = sns.heatmap(
+        constraint_mat.cpu().numpy(),
+        cmap="viridis",
+        vmin=min_val,
+        vmax=max_val,
+        square=True,
+        cbar_kws={"shrink": 0.8}
+    )
+
+    # 设置标题和标签
+    plt.title("Innovative Road Constraint Matrix", fontsize=16)
+    plt.xlabel("Road Segment ID", fontsize=12)
+    plt.ylabel("Road Segment ID", fontsize=12)
+
+    # 添加道路类型标记（对角线）
+    road_types = []
+    for _, _, data in rn.edges(data=True):
+        road_type = data.get('highway', 'secondary')
+        road_types.append(road_type[0].upper())  # 使用首字母
+
+    # 每50条道路标注一次，避免过于密集
+    for i in range(0, len(road_types), 50):
+        road_type_char = road_types[i]
+        ax.text(
+            i + 0.5, i + 0.5, road_type_char,
+            ha='center', va='center',
+            color='white', fontsize=8, fontweight='bold'
+        )
+
+    # 添加图例说明
+    legend_text = (
+        "Road Type Legend:\n"
+        "M: Motorway\nT: Trunk\nP: Primary\n"
+        "S: Secondary\nR: Residential\nU: Unclassified"
+    )
+    plt.figtext(0.82, 0.15, legend_text,
+                fontsize=10, bbox=dict(facecolor='white', alpha=0.7))
+
+    # 保存高质量图片
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved constraint matrix visualization to {filename}")
